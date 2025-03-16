@@ -1,11 +1,9 @@
 import os
-import platform
 
 from conan.tools.build import build_jobs
-from conan.tools.cmake.presets import load_cmake_presets, get_configure_preset
+from conan.tools.cmake.presets import load_cmake_presets
 from conan.tools.cmake.utils import is_multi_configuration
 from conan.tools.files import chdir, mkdir
-from conan.tools.files.files import load_toolchain_args
 from conan.tools.microsoft.msbuild import msbuild_verbosity_cmd_line_arg
 from conans.client.tools.oss import args_to_string
 from conans.errors import ConanException
@@ -55,15 +53,16 @@ class CMake(object):
         self._conanfile = conanfile
 
         cmake_presets = load_cmake_presets(conanfile.generators_folder)
-        configure_preset = get_configure_preset(cmake_presets, conanfile)
+        # Conan generated presets will have exactly 1 configurePresets, no more
+        configure_preset = cmake_presets["configurePresets"][0]
 
         self._generator = configure_preset["generator"]
-        self._toolchain_file = configure_preset["toolchainFile"]
+        self._toolchain_file = configure_preset.get("toolchainFile")
         self._cache_variables = configure_preset["cacheVariables"]
 
         self._cmake_program = "cmake"  # Path to CMake should be handled by environment
 
-    def configure(self, variables=None, build_script_folder=None):
+    def configure(self, variables=None, build_script_folder=None, cli_args=None):
         cmakelist_folder = self._conanfile.source_folder
         if build_script_folder:
             cmakelist_folder = os.path.join(self._conanfile.source_folder, build_script_folder)
@@ -93,12 +92,15 @@ class CMake(object):
         arg_list.extend(['-D{}="{}"'.format(k, v) for k, v in self._cache_variables.items()])
         arg_list.append('"{}"'.format(cmakelist_folder))
 
+        if cli_args:
+            arg_list.extend(cli_args)
+
         command = " ".join(arg_list)
         self._conanfile.output.info("CMake command: %s" % command)
         with chdir(self, build_folder):
             self._conanfile.run(command)
 
-    def _build(self, build_type=None, target=None, cli_args=None, build_tool_args=None):
+    def _build(self, build_type=None, target=None, cli_args=None, build_tool_args=None, env=""):
         bf = self._conanfile.build_folder
         is_multi = is_multi_configuration(self._generator)
         if build_type and not is_multi:
@@ -126,12 +128,12 @@ class CMake(object):
         arg_list = " ".join(filter(None, arg_list))
         command = "%s --build %s" % (self._cmake_program, arg_list)
         self._conanfile.output.info("CMake command: %s" % command)
-        self._conanfile.run(command)
+        self._conanfile.run(command, env=env)
 
     def build(self, build_type=None, target=None, cli_args=None, build_tool_args=None):
         self._build(build_type, target, cli_args, build_tool_args)
 
-    def install(self, build_type=None):
+    def install(self, build_type=None, component=None):
         mkdir(self._conanfile, self._conanfile.package_folder)
 
         bt = build_type or self._conanfile.settings.get_safe("build_type")
@@ -143,17 +145,26 @@ class CMake(object):
         pkg_folder = '"{}"'.format(self._conanfile.package_folder.replace("\\", "/"))
         build_folder = '"{}"'.format(self._conanfile.build_folder)
         arg_list = ["--install", build_folder, build_config, "--prefix", pkg_folder]
+        if component:
+            arg_list.extend(["--component", component])
+
+        do_strip = self._conanfile.conf.get("tools.cmake:install_strip", check_type=bool)
+        if do_strip:
+            arg_list.append("--strip")
         arg_list = " ".join(filter(None, arg_list))
         command = "%s %s" % (self._cmake_program, arg_list)
         self._conanfile.output.info("CMake command: %s" % command)
         self._conanfile.run(command)
 
-    def test(self, build_type=None, target=None, cli_args=None, build_tool_args=None):
+    def test(self, build_type=None, target=None, cli_args=None, build_tool_args=None, env=""):
         if self._conanfile.conf.get("tools.build:skip_test", check_type=bool):
             return
         if not target:
             is_multi = is_multi_configuration(self._generator)
-            target = "RUN_TESTS" if is_multi else "test"
+            is_ninja = "Ninja" in self._generator
+            target = "RUN_TESTS" if is_multi and not is_ninja else "test"
 
+        # The default for ``test()`` is both the buildenv and the runenv
+        env = ["conanbuild", "conanrun"] if env == "" else env
         self._build(build_type=build_type, target=target, cli_args=cli_args,
-                    build_tool_args=build_tool_args)
+                    build_tool_args=build_tool_args, env=env)

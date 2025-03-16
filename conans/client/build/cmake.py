@@ -46,6 +46,17 @@ class CMake(object):
         :param cmake_program: Path to the custom cmake executable
         :param generator_platform: Generator platform name or none to autodetect (-A cmake option)
         """
+        if getattr(conanfile, "must_use_new_helpers", None):
+            wrong_helper_msg = "Using the wrong 'CMake' helper. To use CMakeDeps, CMakeToolchain "\
+                               "you should use 'from conan.tools.cmake import CMake'. "\
+                               "Set environment variable CONAN_DISABLE_STRICT_MODE=1 to override "\
+                               "this check (should only be used to build old packages)."
+            if get_env("CONAN_DISABLE_STRICT_MODE", False):
+                conanfile.output.warning(wrong_helper_msg)
+            else:
+                raise ConanException(wrong_helper_msg)
+        conanfile.output.warning(f"**** The 'from conans import CMake' helper is deprecated. "
+                                 "Please update your code and remove it. ****")
         self._append_vcvars = append_vcvars
         self._conanfile = conanfile
         self._settings = conanfile.settings

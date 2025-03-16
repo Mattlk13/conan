@@ -11,12 +11,13 @@ from conan.tools.cmake.presets import write_cmake_presets
 from conan.tools.cmake.toolchain import CONAN_TOOLCHAIN_FILENAME
 from conan.tools.cmake.toolchain.blocks import ToolchainBlocks, UserToolchain, GenericSystemBlock, \
     AndroidSystemBlock, AppleSystemBlock, FPicBlock, ArchitectureBlock, GLibCXXBlock, VSRuntimeBlock, \
-    CppStdBlock, ParallelBlock, CMakeFlagsInitBlock, TryCompileBlock, FindFiles, SkipRPath, \
-    SharedLibBock, OutputDirsBlock, ExtraFlagsBlock
+    CppStdBlock, ParallelBlock, CMakeFlagsInitBlock, TryCompileBlock, FindFiles, PkgConfigBlock, \
+    SkipRPath, SharedLibBock, OutputDirsBlock, ExtraFlagsBlock, CompilersBlock, LinkerScriptsBlock
 from conan.tools.intel import IntelCC
 from conan.tools.microsoft import VCVars
 from conan.tools.microsoft.visual import vs_ide_version
 from conans.errors import ConanException
+from conans.model.options import PackageOption
 from conans.util.files import save
 
 
@@ -117,17 +118,22 @@ class CMakeToolchain(object):
 
     def __init__(self, conanfile, generator=None):
         self._conanfile = conanfile
+        self._conanfile.must_use_new_helpers = True  # TODO: Remove 2.0
         self.generator = self._get_generator(generator)
         self.variables = Variables()
+        # This doesn't support multi-config, they go to the same configPreset common in multi-config
+        self.cache_variables = {}
         self.preprocessor_definitions = Variables()
 
         self.blocks = ToolchainBlocks(self._conanfile, self,
                                       [("user_toolchain", UserToolchain),
                                        ("generic_system", GenericSystemBlock),
+                                       ("compilers", CompilersBlock),
                                        ("android_system", AndroidSystemBlock),
                                        ("apple_system", AppleSystemBlock),
                                        ("fpic", FPicBlock),
                                        ("arch_flags", ArchitectureBlock),
+                                       ("linker_scripts", LinkerScriptsBlock),
                                        ("libcxx", GLibCXXBlock),
                                        ("vs_runtime", VSRuntimeBlock),
                                        ("cppstd", CppStdBlock),
@@ -136,11 +142,13 @@ class CMakeToolchain(object):
                                        ("cmake_flags_init", CMakeFlagsInitBlock),
                                        ("try_compile", TryCompileBlock),
                                        ("find_paths", FindFiles),
+                                       ("pkg_config", PkgConfigBlock),
                                        ("rpath", SkipRPath),
                                        ("shared", SharedLibBock),
                                        ("output_dirs", OutputDirsBlock)])
 
         check_using_build_profile(self._conanfile)
+        self.user_presets_path = "CMakeUserPresets.json"
 
     def _context(self):
         """ Returns dict, the context for the template
@@ -174,8 +182,24 @@ class CMakeToolchain(object):
         # Generators like Ninja or NMake requires an active vcvars
         elif self.generator is not None and "Visual" not in self.generator:
             VCVars(self._conanfile).generate()
-        toolchain = os.path.join(self._conanfile.generators_folder, toolchain_file or self.filename)
-        write_cmake_presets(self._conanfile, toolchain, self.generator)
+        toolchain = os.path.abspath(os.path.join(self._conanfile.generators_folder,
+                                                 toolchain_file or self.filename))
+        cache_variables = {}
+        for name, value in self.cache_variables.items():
+            if isinstance(value, bool):
+                cache_variables[name] = "ON" if value else "OFF"
+            elif isinstance(value, PackageOption):
+                if str(value).lower() in ["true", "false", "none"]:
+                    cache_variables[name] = "ON" if bool(value) else "OFF"
+                elif str(value).isdigit():
+                    cache_variables[name] = int(value)
+                else:
+                    cache_variables[name] = str(value)
+            else:
+                cache_variables[name] = value
+
+        write_cmake_presets(self._conanfile, toolchain, self.generator, cache_variables,
+                            self.user_presets_path)
 
     def _get_generator(self, recipe_generator):
         # Returns the name of the generator to be used by CMake

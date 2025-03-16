@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import sys
+import textwrap
 from argparse import ArgumentError
 from difflib import get_close_matches
 
@@ -142,6 +143,7 @@ class Command(object):
         Creates a new package recipe template with a 'conanfile.py' and optionally,
         'test_package' testing files.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.new.__doc__,
                                          prog="conan new",
                                          formatter_class=SmartFormatter)
@@ -279,6 +281,7 @@ class Command(object):
         neither definition of package() or package_info() methods. The package
         to be tested must exist in the local cache or any configured remote.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.test.__doc__,
                                          prog="conan test",
                                          formatter_class=SmartFormatter)
@@ -318,6 +321,7 @@ class Command(object):
         that the package has been created correctly. Check 'conan test' command
         to know more about 'test_folder' project.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.create.__doc__,
                                          prog="conan create",
                                          formatter_class=SmartFormatter)
@@ -394,6 +398,7 @@ class Command(object):
                                       profile_build=profile_build,
                                       is_build_require=args.build_require,
                                       require_overrides=args.require_override)
+            self._warn_revisions()
         except ConanException as exc:
             info = exc.info
             raise
@@ -412,7 +417,7 @@ class Command(object):
         is specified, it will download all packages from the specified remote.
         If no remote is specified, it will use the default remote.
         """
-
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.download.__doc__,
                                          prog="conan download",
                                          formatter_class=SmartFormatter)
@@ -469,6 +474,7 @@ class Command(object):
         the package is installed, Conan will write the files for the specified
         generators.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.install.__doc__,
                                          prog="conan install",
                                          formatter_class=SmartFormatter)
@@ -563,6 +569,9 @@ class Command(object):
                                                      lockfile_node_id=args.lockfile_node_id,
                                                      is_build_require=args.build_require,
                                                      require_overrides=args.require_override)
+
+            self._warn_revisions()
+            self._warn_conan_version()
 
         except ConanException as exc:
             info = exc.info
@@ -669,7 +678,6 @@ class Command(object):
         It can be used with a recipe or a reference for any existing package in
         your local cache.
         """
-
         info_only_options = ["id", "build_id", "remote", "url", "license", "requires", "update",
                              "required", "date", "author", "description", "provides", "deprecated",
                              "None"]
@@ -822,6 +830,7 @@ class Command(object):
 
         Usually downloads and uncompresses the package sources.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.source.__doc__,
                                          prog="conan source",
                                          formatter_class=SmartFormatter)
@@ -859,7 +868,7 @@ class Command(object):
         using a build helper, like CMake(), the --package-folder will be
         configured as the destination folder for the install step.
         """
-
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.build.__doc__,
                                          prog="conan build",
                                          formatter_class=SmartFormatter)
@@ -997,7 +1006,7 @@ class Command(object):
         will execute package() method over '--source-folder' and '--build-folder' to create
         the binary package.
         """
-
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.export_pkg.__doc__,
                                          prog="conan export-pkg",
                                          formatter_class=SmartFormatter)
@@ -1018,6 +1027,8 @@ class Command(object):
                             help="folder containing a locally created package. If a value is given,"
                                  " it won't call the recipe 'package()' method, and will run a copy"
                                  " of the provided folder.")
+        parser.add_argument("-of", "--output-folder", action=OnceArgument,
+                            help="To be used with 'layout()' recipes, useless otherwise")
         parser.add_argument("-sf", "--source-folder", action=OnceArgument, help=_SOURCE_FOLDER_HELP)
         parser.add_argument("-j", "--json", default=None, action=OnceArgument,
                             help='Path to a json file where the install information will be '
@@ -1054,6 +1065,7 @@ class Command(object):
                                           build_folder=args.build_folder,
                                           package_folder=args.package_folder,
                                           install_folder=args.install_folder,
+                                          output_folder=args.output_folder,
                                           profile_names=args.profile_host,
                                           env=args.env_host,
                                           settings=args.settings_host,
@@ -1081,6 +1093,7 @@ class Command(object):
         it. Once the recipe is in the local cache it can be shared and reused
         with any remote with the 'conan upload' command.
         """
+        self._warn_conan_version()
         parser = argparse.ArgumentParser(description=self.export.__doc__,
                                          prog="conan export",
                                          formatter_class=SmartFormatter)
@@ -1206,6 +1219,8 @@ class Command(object):
         Useful to promote packages (e.g. from "beta" to "stable") or transfer
         them from one user to another.
         """
+        self._out.warning("Command 'conan copy' is highly discouraged and it has been removed"
+                          " in Conan 2")
         parser = argparse.ArgumentParser(description=self.copy.__doc__,
                                          prog="conan copy",
                                          formatter_class=SmartFormatter)
@@ -1575,7 +1590,7 @@ class Command(object):
         parser_add.add_argument('remote', help='Name of the remote')
         parser_add.add_argument('url', help='URL of the remote')
         parser_add.add_argument('verify_ssl', nargs="?", default="True",
-                                help='Verify SSL certificated. Default True')
+                                help='Verify SSL certificate. Defaulted to True')
         parser_add.add_argument("-i", "--insert", nargs="?", const=0, type=int, action=OnceArgument,
                                 help="insert remote at specific index")
         parser_add.add_argument("-f", "--force", default=False, action='store_true',
@@ -1587,7 +1602,7 @@ class Command(object):
 
         parser_upd.add_argument('url', help='URL')
         parser_upd.add_argument('verify_ssl', nargs="?", default="True",
-                                help='Verify SSL certificated. Default True')
+                                help='Verify SSL certificate. Defaulted to True')
         parser_upd.add_argument("-i", "--insert", nargs="?", const=0, type=int, action=OnceArgument,
                                 help="Insert remote at specific index")
         parser_rename = subparsers.add_parser('rename', help='Update the remote name')
@@ -2176,6 +2191,18 @@ class Command(object):
                                             "recommended to use Python >= 3.5 with Conan", width),
                               front=Color.BRIGHT_RED)
             self._out.writeln("*"*width, front=Color.BRIGHT_RED)
+
+    def _warn_conan_version(self):
+        self._out.writeln("")
+        self._out.warning("*"*50)
+        self._out.warning("*** Conan 1 is legacy and on a deprecation path **")
+        self._out.warning("*********** Please upgrade to Conan 2 ************")
+        self._out.warning("*" * 50)
+
+    def _warn_revisions(self):
+        if self._conan.app and not self._conan.app.config.revisions_enabled:
+            self._conan.app.out.warning("Revisions are disabled. Using Conan without revisions "
+                                        "enabled is deprecated")
 
     def run(self, *args):
         """HIDDEN: entry point for executing commands, dispatcher to class

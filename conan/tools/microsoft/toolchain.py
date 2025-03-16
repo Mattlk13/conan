@@ -7,7 +7,7 @@ from jinja2 import Template
 from conan.tools._check_build_profile import check_using_build_profile
 from conan.tools.build import build_jobs
 from conan.tools.intel.intel_cc import IntelCC
-from conan.tools.microsoft.visual import VCVars, msvc_version_to_toolset_version
+from conan.tools.microsoft.visual import VCVars, msvs_toolset
 from conans.errors import ConanException
 from conans.util.files import save, load
 
@@ -36,12 +36,16 @@ class MSBuildToolchain(object):
           </ItemDefinitionGroup>
           <PropertyGroup Label="Configuration">
             <PlatformToolset>{{ toolset }}</PlatformToolset>
+            {% for k, v in properties.items() %}
+            <{{k}}>{{ v }}</{{k}}>
+            {% endfor %}
           </PropertyGroup>
         </Project>
     """)
 
     def __init__(self, conanfile):
         self._conanfile = conanfile
+        self._conanfile.must_use_new_helpers = True  # TODO: Remove 2.0
         self.preprocessor_definitions = {}
         self.compile_options = {}
         self.cxxflags = []
@@ -50,14 +54,18 @@ class MSBuildToolchain(object):
         self.configuration = conanfile.settings.build_type
         self.runtime_library = self._runtime_library(conanfile.settings)
         self.cppstd = conanfile.settings.get_safe("compiler.cppstd")
-        self.toolset = self._msvs_toolset(conanfile)
+        self.toolset = msvs_toolset(conanfile)
+        self.properties = {}
         check_using_build_profile(self._conanfile)
 
     def _name_condition(self, settings):
         props = [("Configuration", self.configuration),
-                 # FIXME: This probably requires mapping ARM architectures
+                 # TODO: refactor, put in common with MSBuildDeps. Beware this is != msbuild_arch
+                 #  because of Win32
                  ("Platform", {'x86': 'Win32',
-                               'x86_64': 'x64'}.get(settings.get_safe("arch")))]
+                               'x86_64': 'x64',
+                               'armv7': 'ARM',
+                               'armv8': 'ARM64'}.get(settings.get_safe("arch")))]
 
         name = "".join("_%s" % v for _, v in props if v is not None)
         condition = " And ".join("'$(%s)' == '%s'" % (k, v) for k, v in props if v is not None)
@@ -73,37 +81,6 @@ class MSBuildToolchain(object):
             IntelCC(self._conanfile).generate()
         else:
             VCVars(self._conanfile).generate()
-
-    @staticmethod
-    def _msvs_toolset(conanfile):
-        settings = conanfile.settings
-        compiler = settings.get_safe("compiler")
-        compiler_version = settings.get_safe("compiler.version")
-        if compiler == "msvc":
-            subs_toolset = settings.get_safe("compiler.toolset")
-            if subs_toolset:
-                return subs_toolset
-            return msvc_version_to_toolset_version(compiler_version)
-        if compiler == "intel":
-            compiler_version = compiler_version if "." in compiler_version else \
-                "%s.0" % compiler_version
-            return "Intel C++ Compiler " + compiler_version
-        if compiler == "intel-cc":
-            return IntelCC(conanfile).ms_toolset
-        if compiler == "Visual Studio":
-            toolset = settings.get_safe("compiler.toolset")
-            if not toolset:
-                toolsets = {"17": "v143",
-                            "16": "v142",
-                            "15": "v141",
-                            "14": "v140",
-                            "12": "v120",
-                            "11": "v110",
-                            "10": "v100",
-                            "9": "v90",
-                            "8": "v80"}
-                toolset = toolsets.get(compiler_version)
-            return toolset or ""
 
     @staticmethod
     def _runtime_library(settings):
@@ -140,7 +117,7 @@ class MSBuildToolchain(object):
 
         cppstd = "stdcpp%s" % self.cppstd if self.cppstd else ""
         runtime_library = self.runtime_library
-        toolset = self.toolset
+        toolset = self.toolset or ""
         compile_options = self._conanfile.conf.get("tools.microsoft.msbuildtoolchain:compile_options",
                                                    default={}, check_type=dict)
         self.compile_options.update(compile_options)
@@ -160,7 +137,8 @@ class MSBuildToolchain(object):
             "runtime_library": runtime_library,
             "toolset": toolset,
             "compile_options": compile_options,
-            "parallel": parallel
+            "parallel": parallel,
+            "properties": self.properties,
         }
 
     def _write_config_toolchain(self, config_filename):

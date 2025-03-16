@@ -1,5 +1,6 @@
 import os
 
+from conans.model.conf import Conf
 from conans.model.new_build_info import NewCppInfo
 
 
@@ -8,7 +9,27 @@ class Infos(object):
     def __init__(self):
         self.source = NewCppInfo()
         self.build = NewCppInfo()
-        self.package = NewCppInfo()
+        self.package = NewCppInfo(with_defaults=True)
+
+
+class PartialLayout(object):
+    def __init__(self):
+        from conan.tools.env import Environment
+        self.buildenv_info = Environment()
+        self.runenv_info = Environment()
+        self.conf_info = Conf()
+
+    def set_relative_base_folder(self, folder):
+        self.buildenv_info.set_relative_base_folder(folder)
+        self.runenv_info.set_relative_base_folder(folder)
+        self.conf_info.set_relative_base_folder(folder)
+
+
+class Layouts(object):
+    def __init__(self):
+        self.source = PartialLayout()
+        self.build = PartialLayout()
+        self.package = PartialLayout()
 
 
 class Folders(object):
@@ -31,6 +52,10 @@ class Folders(object):
         # Relative location of the project root, if the conanfile is not in that project root, but
         # in a subfolder: e.g: If the conanfile is in a subfolder then self.root = ".."
         self.root = None
+        # The relative location with respect to the project root of the subproject containing the
+        # conanfile.py, that makes most of the output folders defined in layouts (cmake_layout, etc)
+        # start from the subproject again
+        self.subproject = None
 
     def __repr__(self):
         return str(self.__dict__)

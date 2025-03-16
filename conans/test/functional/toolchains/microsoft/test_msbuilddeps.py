@@ -496,7 +496,7 @@ class MSBuildGeneratorTest(unittest.TestCase):
         client = TestClient()
         client.save({"conanfile.py": GenConanfile()})
         client.run("create . mypkg/0.1@")
-        client.run("install mypkg/0.1@ -g msbuild -s build_type=None", assert_error=True)
+        client.run("install mypkg/0.1@ -g MSBuildDeps -s build_type=None", assert_error=True)
         self.assertIn("The 'msbuild' generator requires a 'build_type' setting value", client.out)
 
     def test_custom_configuration(self):
@@ -575,7 +575,7 @@ class MSBuildGeneratorTest(unittest.TestCase):
             class HelloConan(ConanFile):
                 settings = "os", "build_type", "compiler", "arch"
                 requires = "pkgb/1.0@", "pkga/1.0"
-                generators = "msbuild"
+                generators = "MSBuildDeps"
                 def build(self):
                     msbuild = MSBuild(self)
                     msbuild.build("MyProject.sln")
@@ -593,7 +593,6 @@ class MSBuildGeneratorTest(unittest.TestCase):
 
         client.save(files, clean_first=True)
         client.run("install .")
-        self.assertIn("'msbuild' has been deprecated and moved.", client.out)
         client.run("build .")
         self.assertNotIn("warning MSB4011", client.out)
 
@@ -665,13 +664,14 @@ def test_exclude_code_analysis(pattern, exclude_a, exclude_b):
         class HelloConan(ConanFile):
             settings = "os", "build_type", "compiler", "arch"
             requires = "pkgb/1.0@", "pkga/1.0"
-            generators = "msbuild"
+            generators = "MSBuildDeps"
             def build(self):
                 msbuild = MSBuild(self)
                 msbuild.build("MyProject.sln")
         """)
     profile = textwrap.dedent("""
         include(default)
+        [settings]
         build_type=Release
         arch=x86_64
         [conf]
@@ -1004,6 +1004,7 @@ def test_build_requires_transitives():
     c.run("create tool")
     c.run("install consumer -g MSBuildDeps")
     tool = c.load("conan_tool_build_release_x64.props")
-    assert "conan_dep" not in tool
+    assert "conan_dep_build.props" in tool
+    assert "conan_dep.props" not in tool
     tool_vars = c.load("conan_tool_build_vars_release_x64.props")
-    assert "<Conantool_buildDependencies></Conantool_buildDependencies>" in tool_vars
+    assert "<Conantool_buildRootFolder>" in tool_vars

@@ -226,6 +226,17 @@ class OptionsValues(object):
     def __contains__(self, item):
         return item in self._package_values
 
+    def get_safe(self, attr):
+        if attr not in self._package_values:
+            return None
+        return getattr(self._package_values, attr)
+
+    def rm_safe(self, attr):
+        try:
+            delattr(self._package_values, attr)
+        except ConanException:
+            pass
+
     def __getitem__(self, item):
         return self._reqs_options.setdefault(item, PackageOptionValues())
 
@@ -249,7 +260,8 @@ class OptionsValues(object):
             return False
         # It is possible that the entry in the dict is not defined
         for key, pkg_values in self._reqs_options.items():
-            other_values = other[key]
+            # We do a get so we don't artificially inject new keys in "other"
+            other_values = other._reqs_options.get(key, PackageOptionValues())
             if not pkg_values == other_values:
                 return False
         return True
@@ -331,7 +343,8 @@ class PackageOption(object):
     def __init__(self, possible_values, name):
         self._name = name
         self._value = None
-        if possible_values == "ANY":
+        if possible_values == "ANY" or (isinstance(possible_values, list) and
+                                        "ANY" in possible_values):
             self._possible_values = "ANY"
         else:
             self._possible_values = sorted(str(v) for v in possible_values)
@@ -418,6 +431,12 @@ class PackageOptions(object):
 
     def get_safe(self, field, default=None):
         return self._data.get(field, default)
+
+    def rm_safe(self, field):
+        try:
+            delattr(self, field)
+        except ConanException:
+            pass
 
     def validate(self):
         for child in self._data.values():
@@ -577,6 +596,9 @@ class Options(object):
             self._package_options.__delattr__(field)
         except ConanException:
             pass
+
+    def rm_safe(self, field):
+        self._package_options.rm_safe(field)
 
     @property
     def values(self):

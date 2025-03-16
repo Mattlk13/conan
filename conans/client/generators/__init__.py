@@ -72,7 +72,8 @@ class GeneratorManager(object):
                                 "MesonToolchain", "MSBuildDeps", "QbsToolchain", "msbuild",
                                 "VirtualRunEnv", "VirtualBuildEnv", "AutotoolsDeps",
                                 "AutotoolsToolchain", "BazelDeps", "BazelToolchain", "PkgConfigDeps",
-                                "VCVars", "IntelCC", "XcodeDeps", "PremakeDeps", "XcodeToolchain"]
+                                "VCVars", "IntelCC", "XcodeDeps", "PremakeDeps", "XcodeToolchain",
+                                "MesonDeps", "NMakeToolchain", "NMakeDeps", "SConsDeps"]
 
     def add(self, name, generator_class, custom=False):
         if name not in self._generators or custom:
@@ -113,7 +114,10 @@ class GeneratorManager(object):
         elif generator_name == "MesonToolchain":
             from conan.tools.meson import MesonToolchain
             return MesonToolchain
-        elif generator_name in ("MSBuildDeps", "msbuild"):
+        elif generator_name == "MesonDeps":
+            from conan.tools.meson import MesonDeps
+            return MesonDeps
+        elif generator_name == "MSBuildDeps":
             from conan.tools.microsoft import MSBuildDeps
             return MSBuildDeps
         elif generator_name == "VCVars":
@@ -146,6 +150,15 @@ class GeneratorManager(object):
         elif generator_name == "XcodeToolchain":
             from conan.tools.apple import XcodeToolchain
             return XcodeToolchain
+        elif generator_name == "NMakeToolchain":
+            from conan.tools.microsoft import NMakeToolchain
+            return NMakeToolchain
+        elif generator_name == "NMakeDeps":
+            from conan.tools.microsoft import NMakeDeps
+            return NMakeDeps
+        elif generator_name == "SConsDeps":
+            from conan.tools.scons import SConsDeps
+            return SConsDeps
         else:
             raise ConanException("Internal Conan error: Generator '{}' "
                                  "not commplete".format(generator_name))
@@ -158,17 +171,6 @@ class GeneratorManager(object):
         for generator_name in set(conanfile.generators):
             generator_class = self._new_generator(generator_name, output)
             if generator_class:
-                if generator_name == "msbuild":
-                    msg = (
-                        "\n*****************************************************************\n"
-                        "******************************************************************\n"
-                        "'msbuild' has been deprecated and moved.\n"
-                        "It will be removed in next Conan release.\n"
-                        "Use 'MSBuildDeps' method instead.\n"
-                        "********************************************************************\n"
-                        "********************************************************************\n")
-                    from conans.client.output import Color
-                    output.writeln(msg, front=Color.BRIGHT_RED)
                 try:
                     generator = generator_class(conanfile)
                     output.highlight("Generator '{}' calling 'generate()'".format(generator_name))
@@ -197,6 +199,12 @@ class GeneratorManager(object):
             try:
                 generator.output_path = old_gen_folder
                 content = generator.content
+                if generator_name != "txt":
+                    conanfile.output.warn(f"\n"
+                                          f"     ************************************************\n"
+                                          f"     The '{generator_name}' generator is deprecated.\n"
+                                          f"     Please update your code and remove it.\n"
+                                          f"     *************************************************\n")
                 if isinstance(content, dict):
                     if generator.filename:
                         output.warn("Generator %s is multifile. Property 'filename' not used"
@@ -250,6 +258,7 @@ def write_toolchain(conanfile, path, output):
 
     # tools.env.virtualenv:auto_use will be always True in Conan 2.0
     if conanfile.conf["tools.env.virtualenv:auto_use"]:
+        mkdir(path)
         with chdir(path):
             if conanfile.virtualbuildenv:
                 from conan.tools.env.virtualbuildenv import VirtualBuildEnv
@@ -280,12 +289,16 @@ def _generate_aggregated_env(conanfile):
         ps1s = []
         for env_script in env_scripts:
             path = os.path.join(conanfile.generators_folder, env_script)
+            # Only the .bat and .ps1 are made relative to current script
             if env_script.endswith(".bat"):
-                bats.append(path)
+                path = os.path.relpath(path, conanfile.generators_folder)
+                bats.append("%~dp0/"+path)
             elif env_script.endswith(".sh"):
                 shs.append(subsystem_path(subsystem, path))
             elif env_script.endswith(".ps1"):
-                ps1s.append(path)
+                path = os.path.relpath(path, conanfile.generators_folder)
+                # This $PSScriptRoot uses the current script directory
+                ps1s.append("$PSScriptRoot/"+path)
         if shs:
             def sh_content(files):
                 return ". " + " && . ".join('"{}"'.format(s) for s in files)

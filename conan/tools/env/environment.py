@@ -58,14 +58,14 @@ def environment_wrap_command(env_filenames, env_folder, cmd, subsystem=None,
         return '{} && {}'.format(launchers, cmd)
     elif ps1s:
         # TODO: at the moment it only works with path without spaces
-        launchers = " ; ".join('{}'.format(f) for f in ps1s)
+        launchers = " ; ".join('"&\'{}\'"'.format(f) for f in ps1s)
         return 'powershell.exe {} ; cmd /c {}'.format(launchers, cmd)
     else:
         return cmd
 
 
 class _EnvValue:
-    def __init__(self, name, value=_EnvVarPlaceHolder, separator=" ", path=False):
+    def __init__(self, name, value=None, separator=" ", path=False):
         self._name = name
         self._values = [] if value is None else value if isinstance(value, list) else [value]
         self._path = path
@@ -154,6 +154,12 @@ class _EnvValue:
         previous_value = os.getenv(self._name)
         return self.get_str(previous_value, subsystem, pathsep)
 
+    def set_relative_base_folder(self, folder):
+        if not self._path:
+            return
+        self._values = [os.path.join(folder, v) if v != _EnvVarPlaceHolder else v
+                        for v in self._values]
+
 
 class Environment:
     def __init__(self):
@@ -192,16 +198,16 @@ class Environment:
         self._values[name] = _EnvValue(name, None)
 
     def append(self, name, value, separator=None):
-        self._values.setdefault(name, _EnvValue(name)).append(value, separator)
+        self._values.setdefault(name, _EnvValue(name, _EnvVarPlaceHolder)).append(value, separator)
 
     def append_path(self, name, value):
-        self._values.setdefault(name, _EnvValue(name, path=True)).append(value)
+        self._values.setdefault(name, _EnvValue(name, _EnvVarPlaceHolder, path=True)).append(value)
 
     def prepend(self, name, value, separator=None):
-        self._values.setdefault(name, _EnvValue(name)).prepend(value, separator)
+        self._values.setdefault(name, _EnvValue(name, _EnvVarPlaceHolder)).prepend(value, separator)
 
     def prepend_path(self, name, value):
-        self._values.setdefault(name, _EnvValue(name, path=True)).prepend(value)
+        self._values.setdefault(name, _EnvValue(name, _EnvVarPlaceHolder, path=True)).prepend(value)
 
     def remove(self, name, value):
         self._values[name].remove(value)
@@ -231,12 +237,16 @@ class Environment:
         return not self.__eq__(other)
 
     def vars(self, conanfile, scope="build"):
-        return EnvVars(conanfile, self, scope)
+        return EnvVars(conanfile, self._values, scope)
+
+    def set_relative_base_folder(self, folder):
+        for v in self._values.values():
+            v.set_relative_base_folder(folder)
 
 
 class EnvVars:
-    def __init__(self, conanfile, env, scope):
-        self._values = env._values  # {var_name: _EnvValue}, just a reference to the Environment
+    def __init__(self, conanfile, values, scope):
+        self._values = values  # {var_name: _EnvValue}, just a reference to the Environment
         self._conanfile = conanfile
         self._scope = scope
         self._subsystem = deduce_subsystem(conanfile, scope)
@@ -251,16 +261,34 @@ class EnvVars:
     def keys(self):
         return self._values.keys()
 
-    def get(self, name, default=None):
+    def get(self, name, default=None, variable_reference=None):
+        """
+        :param name: The name of the environment variable
+        :param default: The returned value if the variable doesn't exist, by default None
+        :param variable_reference: if specified, use a variable reference instead of the
+        pre-existing value of environment variable, where {name} can be used to refer to the
+        name of the variable.
+        """
         v = self._values.get(name)
         if v is None:
             return default
-        return v.get_value(self._subsystem, self._pathsep)
+        if variable_reference:
+            return v.get_str(variable_reference, self._subsystem, self._pathsep)
+        else:
+            return v.get_value(self._subsystem, self._pathsep)
 
-    def items(self):
-        """returns {str: str} (varname: value)"""
-        return {k: v.get_value(self._subsystem, self._pathsep)
-                for k, v in self._values.items()}.items()
+    def items(self, variable_reference=None):
+        """returns {str: str} (varname: value)
+         :param variable_reference: if specified, use a variable reference instead of the
+        pre-existing value of environment variable, where {name} can be used to refer to the
+        name of the variable.
+        """
+        if variable_reference:
+            return {k: v.get_str(variable_reference, self._subsystem, self._pathsep)
+                    for k, v in self._values.items()}.items()
+        else:
+            return {k: v.get_value(self._subsystem, self._pathsep)
+                    for k, v in self._values.items()}.items()
 
     @contextmanager
     def apply(self):
@@ -274,31 +302,30 @@ class EnvVars:
             os.environ.update(old_env)
 
     def save_bat(self, file_location, generate_deactivate=True):
-        filepath, filename = os.path.split(file_location)
-        deactivate_file = os.path.join(filepath, "deactivate_{}".format(filename))
+        _, filename = os.path.split(file_location)
+        deactivate_file = "deactivate_{}".format(filename)
         deactivate = textwrap.dedent("""\
-            echo Capturing current environment in {deactivate_file}
             setlocal
-            echo @echo off > "{deactivate_file}"
-            echo echo Restoring environment >> "{deactivate_file}"
+            echo @echo off > "%~dp0/{deactivate_file}"
+            echo echo Restoring environment >> "%~dp0/{deactivate_file}"
             for %%v in ({vars}) do (
                 set foundenvvar=
                 for /f "delims== tokens=1,2" %%a in ('set') do (
                     if /I "%%a" == "%%v" (
-                        echo set "%%a=%%b">> "{deactivate_file}"
+                        echo set "%%a=%%b">> "%~dp0/{deactivate_file}"
                         set foundenvvar=1
                     )
                 )
                 if not defined foundenvvar (
-                    echo set %%v=>> "{deactivate_file}"
+                    echo set %%v=>> "%~dp0/{deactivate_file}"
                 )
             )
             endlocal
             """).format(deactivate_file=deactivate_file, vars=" ".join(self._values.keys()))
         capture = textwrap.dedent("""\
             @echo off
+            chcp 65001 > nul
             {deactivate}
-            echo Configuring environment variables
             """).format(deactivate=deactivate if generate_deactivate else "")
         result = [capture]
         for varname, varvalues in self._values.items():
@@ -306,14 +333,15 @@ class EnvVars:
             result.append('set "{}={}"'.format(varname, value))
 
         content = "\n".join(result)
-        save(file_location, content)
+        # It is very important to save it correctly with utf-8, the Conan util save() is broken
+        os.makedirs(os.path.dirname(os.path.abspath(file_location)), exist_ok=True)
+        open(file_location, "w", encoding="utf-8").write(content)
 
     def save_ps1(self, file_location, generate_deactivate=True,):
-        filepath, filename = os.path.split(file_location)
-        deactivate_file = os.path.join(filepath, "deactivate_{}".format(filename))
+        _, filename = os.path.split(file_location)
+        deactivate_file = "deactivate_{}".format(filename)
         deactivate = textwrap.dedent("""\
-            echo "Capturing current environment in {deactivate_file}"
-
+            Push-Location $PSScriptRoot
             "echo `"Restoring environment`"" | Out-File -FilePath "{deactivate_file}"
             $vars = (Get-ChildItem env:*).name
             $updated_vars = @({vars})
@@ -330,6 +358,7 @@ class EnvVars:
                     Add-Content "{deactivate_file}" "`nif (Test-Path env:$var) {{ Remove-Item env:$var }}"
                 }}
             }}
+            Pop-Location
         """).format(
             deactivate_file=deactivate_file,
             vars=",".join(['"{}"'.format(var) for var in self._values.keys()])
@@ -337,7 +366,6 @@ class EnvVars:
 
         capture = textwrap.dedent("""\
             {deactivate}
-            echo "Configuring environment variables"
         """).format(deactivate=deactivate if generate_deactivate else "")
         result = [capture]
         for varname, varvalues in self._values.items():
@@ -349,18 +377,21 @@ class EnvVars:
                 result.append('if (Test-Path env:{0}) {{ Remove-Item env:{0} }}'.format(varname))
 
         content = "\n".join(result)
-        save(file_location, content)
+        # It is very important to save it correctly with utf-16, the Conan util save() is broken
+        # and powershell uses utf-16 files!!!
+        os.makedirs(os.path.dirname(os.path.abspath(file_location)), exist_ok=True)
+        open(file_location, "w", encoding="utf-16").write(content)
 
     def save_sh(self, file_location, generate_deactivate=True):
         filepath, filename = os.path.split(file_location)
         deactivate_file = os.path.join(filepath, "deactivate_{}".format(filename))
         deactivate = textwrap.dedent("""\
-           echo Capturing current environment in "{deactivate_file}"
-           echo "echo Restoring environment" >> "{deactivate_file}"
+           echo "echo Restoring environment" > "{deactivate_file}"
            for v in {vars}
            do
-               value=$(printenv $v)
-               if [ -n "$value" ]
+               is_defined="true"
+               value=$(printenv $v) || is_defined="" || true
+               if [ -n "$value" ] || [ -n "$is_defined" ]
                then
                    echo export "$v='$value'" >> "{deactivate_file}"
                else
@@ -370,7 +401,6 @@ class EnvVars:
            """.format(deactivate_file=deactivate_file, vars=" ".join(self._values.keys())))
         capture = textwrap.dedent("""\
               {deactivate}
-              echo Configuring environment variables
               """).format(deactivate=deactivate if generate_deactivate else "")
         result = [capture]
         for varname, varvalues in self._values.items():

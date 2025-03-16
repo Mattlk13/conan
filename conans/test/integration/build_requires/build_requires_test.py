@@ -1,7 +1,9 @@
+import json
 import os
 import textwrap
 import unittest
 
+import pytest
 from parameterized.parameterized import parameterized
 
 from conans.model.ref import ConanFileReference
@@ -527,3 +529,197 @@ def test_tool_requires_conanfile_txt():
     client.save({"conanfile.txt": consumer}, clean_first=True)
     client.run("install . --build=missing")
     assert "Applying build-requirement: build_req/1.0@test/test" in client.out
+
+
+class TestBuildTrackHost:
+
+    @pytest.mark.parametrize("build_profile", [False, True])
+    def test_overriden_host_version(self, build_profile):
+        """
+        Make the tool_requires follow the regular require with the expression "<host_version>"
+        """
+        c = TestClient()
+        pkg = textwrap.dedent("""
+            from conan import ConanFile
+            class ProtoBuf(ConanFile):
+                name = "pkg"
+                version = "0.1"
+                def requirements(self):
+                    self.requires("protobuf/1.0")
+                def build_requirements(self):
+                    self.tool_requires("protobuf/<host_version>")
+            """)
+        c.save({"protobuf/conanfile.py": GenConanfile("protobuf"),
+                "pkg/conanfile.py": pkg,
+                "app/conanfile.py": GenConanfile().with_requires("pkg/0.1")
+                                                  .with_requirement("protobuf/1.1", override=True)})
+        c.run("create protobuf 1.0@")
+        c.run("create protobuf 1.1@")
+        build_profile = "-pr:b default" if build_profile else ""
+        c.run(f"create pkg {build_profile}")
+        c.run(f"install pkg {build_profile}")  # make sure it doesn't crash
+        c.run(f"install app {build_profile}")
+        assert "protobuf/1.1" in c.out
+        assert "protobuf/1.0:" not in c.out
+
+        # verify locks work
+        c.run(f"lock create app/conanfile.py {build_profile}")
+        lock = c.load("conan.lock")
+        assert "protobuf/1.1" in lock
+        assert "protobuf/1.0" not in lock
+        # lock can be used
+        c.run(f"install app --lockfile=conan.lock")
+        assert "protobuf/1.1" in c.out
+        assert "protobuf/1.0:" not in c.out
+
+    @pytest.mark.parametrize("build_profile", [False, True])
+    def test_overriden_host_version_version_range(self, build_profile):
+        """
+        same as above, but using version ranges instead of overrides
+        """
+        build_profile = "-pr:b default" if build_profile else ""
+        c = TestClient()
+        c.save({"protobuf/conanfile.py": GenConanfile("protobuf"),
+                "pkg/conanfile.py": GenConanfile("pkg", "0.1").with_requirement("protobuf/[*]")
+               .with_build_requirement("protobuf/<host_version>"),
+                "app/conanfile.py": GenConanfile().with_requires("pkg/0.1")})
+        c.run("create protobuf 1.0@")
+        c.run(f"create pkg {build_profile}")
+        c.run(f"install pkg {build_profile}")  # make sure it doesn't crash
+        c.run(f"install app {build_profile}")
+        assert "protobuf/1.0" in c.out
+        assert "protobuf/1.1" not in c.out
+
+        c.run("create protobuf 1.1@")
+        c.run(f"install pkg {build_profile}")  # make sure it doesn't crash
+        c.run(f"install app {build_profile}")
+        assert "protobuf/1.1" in c.out
+        assert "protobuf/1.0" not in c.out
+
+        # verify locks work
+        c.run(f"lock create app/conanfile.py {build_profile}")
+        lock = c.load("conan.lock")
+        assert "protobuf/1.1" in lock
+        assert "protobuf/1.0" not in lock
+        # lock can be used
+        c.run("install app --lockfile=conan.lock")
+        assert "protobuf/1.1" in c.out
+        assert "protobuf/1.0:" not in c.out
+
+    @pytest.mark.parametrize("build_profile", [False, True])
+    def test_track_host_error_nothost(self, build_profile):
+        """
+        if no host requirement is defined, it will be an error
+        """
+        build_profile = "-pr:b default" if build_profile else ""
+        c = TestClient()
+        c.save({"conanfile.py":
+                GenConanfile("pkg").with_build_requirement("protobuf/<host_version>")})
+        c.run(f"install . {build_profile}", assert_error=True)
+        assert "pkg/None require 'protobuf/<host_version>': didn't find a matching host dependency" in c.out
+
+    @pytest.mark.parametrize("build_profile", [False, True])
+    def test_track_host_error_wrong_context(self, build_profile):
+        """
+        it can only be used by tool_requires, not regular requires
+        """
+        build_profile = "-pr:b default" if build_profile else ""
+        c = TestClient()
+        c.save({"conanfile.py": GenConanfile("pkg").with_requirement("protobuf/<host_version>")})
+        c.run(f"install . {build_profile}", assert_error=True)
+        assert "uses '<host_version>' in requires" in c.out
+
+    @pytest.mark.parametrize("build_profile", [False, True])
+    def test_host_version_test_package(self, build_profile):
+        """
+        https://github.com/conan-io/conan/issues/14704
+        """
+        c = TestClient()
+        pkg = textwrap.dedent("""
+                from conan import ConanFile
+                class ProtoBuf(ConanFile):
+                    name = "pkg"
+                    version = "0.1"
+                    def requirements(self):
+                        self.requires("protobuf/[>=1.0]")
+                    def build_requirements(self):
+                        self.tool_requires("protobuf/<host_version>")
+                """)
+        # regular requires test_package
+        c.save({"protobuf/conanfile.py": GenConanfile("protobuf"),
+                "pkg/conanfile.py": pkg,
+                "pkg/test_package/conanfile.py": GenConanfile().with_test("pass")})
+        c.run("create protobuf 1.0@")
+        build_profile = "-pr:b default" if build_profile else ""
+        c.run(f"create pkg {build_profile}")
+        # works without problem
+
+        test = textwrap.dedent("""
+                from conan import ConanFile
+                class Test(ConanFile):
+                    test_type = "explicit"
+
+                    def build_requirements(self):
+                        self.tool_requires(self.tested_reference_str)
+                    def test(self):
+                        pass
+                """)
+        c.save({"pkg/test_package/conanfile.py": test})
+        c.run("create protobuf 1.0@")
+        build_profile = "-pr:b default" if build_profile else ""
+        # This used to fail
+        c.run(f"create pkg {build_profile}")
+        assert "protobuf/1.0 from local cache - Cache" in c.out
+
+    @pytest.mark.parametrize("host_version, assert_error, assert_msg", [
+        ("libgettext>", False, "gettext/0.2:5ab84d6acfe1f23c4fae0ab88f26e3a396351ac9 - Cache"),
+        # Error cases, just checking that we fail gracefully - no tracebacks
+        ("foo>", True, "app/1.0 require 'foo/<host_version:foo>': didn't find a matching host dependency"),
+        ("libgettext", True, "Package gettext has an invalid version number: '<host_version:libgettext'"),
+        (":>", True, "app/1.0 require ':/<host_version::>': didn't find a matching host dependency"),
+        (">", True, "app/1.0 require '/<host_version:>': didn't find a matching host dependency"),
+        (":", True, " Package gettext has an invalid version number: '<host_version::'"),
+        ("", True, " Package gettext has an invalid version number: '<host_version:'")
+    ])
+    def test_host_version_different_ref(self, host_version, assert_error, assert_msg):
+        tc = TestClient()
+        tc.save({"gettext/conanfile.py": GenConanfile("gettext"),
+                 "libgettext/conanfile.py": GenConanfile("libgettext"),
+                 "app/conanfile.py": GenConanfile("app", "1.0").with_requires("libgettext/[>0.1]")
+                .with_build_requires(f"gettext/<host_version:{host_version}")})
+        tc.run("create libgettext libgettext/0.2@")
+        tc.run("create gettext gettext/0.1@ --build-require")
+        tc.run("create gettext gettext/0.2@ --build-require")
+
+        tc.run("create app app/1.0@", assert_error=assert_error)
+        assert assert_msg in tc.out
+
+    @pytest.mark.parametrize("requires_tag,tool_requires_tag,fails", [
+        ("user/channel", "user/channel", False),
+        ("", "user/channel", True),
+        ("auser/achannel", "anotheruser/anotherchannel", True),
+    ])
+    def test_overriden_host_version_user_channel(self, requires_tag, tool_requires_tag, fails):
+        """
+        Make the tool_requires follow the regular require with the expression "<host_version>"
+        """
+        c = TestClient()
+        pkg = textwrap.dedent(f"""
+                from conan import ConanFile
+                class ProtoBuf(ConanFile):
+                    name = "pkg"
+                    version = "0.1"
+                    def requirements(self):
+                        self.requires("protobuf/1.0@{requires_tag}")
+                    def build_requirements(self):
+                        self.tool_requires("protobuf/<host_version>@{tool_requires_tag}")
+                """)
+        c.save({"protobuf/conanfile.py": GenConanfile("protobuf"),
+                "pkg/conanfile.py": pkg})
+        c.run(f"create protobuf 1.0@{requires_tag}")
+
+        c.run("create pkg", assert_error=fails)
+        if fails:
+            assert "pkg/0.1 require 'protobuf/<host_version>': didn't find a matching host dependency" in c.out
+        else:
+            assert "Package '08f50edefe03c3273e386557efc23dc41a9f600b' created" in c.out

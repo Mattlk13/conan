@@ -3,7 +3,7 @@ import time
 from conans.client.conanfile.configure import run_configure_method
 from conans.client.graph.graph import DepsGraph, Node, RECIPE_EDITABLE, CONTEXT_HOST, CONTEXT_BUILD
 from conans.errors import (ConanException, ConanExceptionInUserConanfileMethod,
-                           conanfile_exception_formatter)
+                           conanfile_exception_formatter, ConanInvalidConfiguration)
 from conans.model.conan_file import get_env_context_manager
 from conans.model.ref import ConanFileReference
 from conans.model.requires import Requirements, Requirement
@@ -65,7 +65,9 @@ class DepsGraphBuilder(object):
         t1 = time.time()
         self._expand_node(root_node, dep_graph, Requirements(), None, None, check_updates,
                           update, remotes, profile_host, profile_build, graph_lock)
+
         logger.debug("GRAPH: Time to load deps %s" % (time.time() - t1))
+
         return dep_graph
 
     def extend_build_requires(self, graph, node, build_requires_refs, check_updates, update,
@@ -76,6 +78,10 @@ class DepsGraphBuilder(object):
         # an option conflict while expanding the build_requires is impossible
         node.conanfile.build_requires_options.clear_unscoped_options()
         new_options = node.conanfile.build_requires_options._reqs_options
+        # FIXME: Convert to pattern-based for build_requires, do not fail hard if some option
+        #  was removed
+        if profile_build:  # Apply the fix only for the 2 profile scenario
+            new_options = {k+"*": v for k, v in new_options.items()}
         new_reqs = Requirements()
 
         conanfile = node.conanfile
@@ -398,6 +404,30 @@ class DepsGraphBuilder(object):
 
     def _resolve_recipe(self, current_node, dep_graph, requirement, check_updates,
                         update, remotes, profile, graph_lock, original_ref=None):
+        ref = requirement.ref
+        ref_version = str(ref.version)
+        if ref_version.startswith("<host_version") and ref_version.endswith(">"):
+            if not requirement.build_require:
+                raise ConanException(f"{current_node.ref} uses '<host_version>' in requires, "
+                                     "it is only allowed in tool_requires")
+            search_ref_name = ref.name
+            tracking_ref = ref_version.split(":", 1)
+            if len(tracking_ref) == 2:
+                search_ref_name = tracking_ref[1][:-1]  # Remove trailing '>'
+            transitive = next((dep for dep in current_node.dependencies if
+                               not dep.build_require and
+                               dep.require.ref.name == search_ref_name and
+                               dep.require.ref.user == ref.user and
+                               dep.require.ref.channel == ref.channel), None)
+            if transitive is None:
+                raise ConanException(
+                    f"{current_node.ref} require '{search_ref_name}/{ref_version}': didn't find a matching host dependency")
+            new_ref = transitive.require.ref
+            # Final ref is the one from the transitive dependency, but with the version from the
+            # tracked requirement, if any
+            requirement.ref = ConanFileReference(ref.name, new_ref.version,
+                                                 new_ref.user, new_ref.channel)
+
         try:
             result = self._proxy.get_recipe(requirement.ref, check_updates, update,
                                             remotes, self._recorder)
@@ -471,4 +501,5 @@ class DepsGraphBuilder(object):
 
         dep_graph.add_node(new_node)
         dep_graph.add_edge(current_node, new_node, requirement)
+
         return new_node

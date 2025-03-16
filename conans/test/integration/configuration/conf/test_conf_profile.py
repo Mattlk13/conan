@@ -3,6 +3,7 @@ import textwrap
 
 import pytest
 
+from conans.test.assets.genconanfile import GenConanfile
 from conans.test.utils.tools import TestClient
 
 
@@ -17,7 +18,7 @@ def client():
             settings = "os", "arch", "compiler", "build_type"
             generators = "CMakeToolchain"
 
-            def run(self, cmd):  # INTERCEPTOR of running
+            def run(self, cmd, env=None):  # INTERCEPTOR of running
                 self.output.info("RECIPE-RUN: {}".format(cmd))
 
             def build(self):
@@ -164,3 +165,68 @@ def test_msbuild_compile_options():
     client.run("install . -pr=myprofile")
     msbuild_tool = client.load("conantoolchain_release_x64.props")
     assert "<ExceptionHandling>Async</ExceptionHandling>" in msbuild_tool
+
+
+def test_config_package_append(client):
+    profile1 = textwrap.dedent("""\
+        [conf]
+        user.myteam:myconf=["a", "b", "c"]
+        """)
+    profile2 = textwrap.dedent("""\
+        include(profile1)
+        [conf]
+        mypkg*:user.myteam:myconf+=["d"]
+        mydep*:user.myteam:myconf=+["e"]
+        """)
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+        class Pkg(ConanFile):
+            def generate(self):
+                self.output.info(f"MYCONF: {self.conf.get('user.myteam:myconf')}")
+            def build(self):
+                self.output.info(f"MYCONFBUILD: {self.conf.get('user.myteam:myconf')}")
+            """)
+    client.save({"profile1": profile1,
+                 "profile2": profile2,
+                 "conanfile.py": conanfile})
+    client.run("install . mypkg/0.1@ -pr=profile2")
+    assert "conanfile.py (mypkg/0.1): MYCONF: ['a', 'b', 'c', 'd']" in client.out
+    client.run("install . mydep/0.1@ -pr=profile2")
+    assert "conanfile.py (mydep/0.1): MYCONF: ['e', 'a', 'b', 'c']" in client.out
+
+    client.run("create . mypkg/0.1@ -pr=profile2")
+    assert "mypkg/0.1: MYCONFBUILD: ['a', 'b', 'c', 'd']" in client.out
+    client.run("create . mydep/0.1@ -pr=profile2")
+    assert "mydep/0.1: MYCONFBUILD: ['e', 'a', 'b', 'c']" in client.out
+
+
+def test_conf_patterns_user_channel():
+    # https://github.com/conan-io/conan/issues/14139
+    client = TestClient()
+    conanfile = textwrap.dedent("""
+        from conans import ConanFile
+
+        class Pkg(ConanFile):
+            def configure(self):
+                self.output.info(f"CONF: {self.conf.get('user.myteam:myconf')}")
+                self.output.info(f"CONF2: {self.conf.get('user.myteam:myconf2')}")
+        """)
+    profile = textwrap.dedent("""\
+        [conf]
+        user.myteam:myconf=myvalue1
+        user.myteam:myconf2=other1
+        *@user/channel:user.myteam:myconf=myvalue2
+        *@*/*:user.myteam:myconf2=other2
+        """)
+    client.save({"dep/conanfile.py": conanfile,
+                 "app/conanfile.py": GenConanfile().with_requires("dep1/0.1",
+                                                                  "dep2/0.1@user/channel"),
+                 "profile": profile})
+
+    client.run("create dep dep1/0.1@")
+    client.run("create dep dep2/0.1@user/channel")
+    client.run("install app -pr=profile")
+    assert "dep1/0.1: CONF: myvalue1" in client.out
+    assert "dep2/0.1@user/channel: CONF: myvalue2" in client.out
+    assert "dep1/0.1: CONF2: other1" in client.out
+    assert "dep2/0.1@user/channel: CONF2: other2" in client.out

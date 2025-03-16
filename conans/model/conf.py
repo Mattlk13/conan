@@ -1,4 +1,5 @@
 import fnmatch
+import os
 from collections import OrderedDict
 
 import six
@@ -6,7 +7,7 @@ import six
 from conans.errors import ConanException
 
 BUILT_IN_CONFS = {
-    "core:required_conan_version": "Raise if current version does not match the defined range.",
+    "core:required_conan_version": "Raise if current version does not match the defined range",
     "core.package_id:msvc_visual_incompatible": "Allows opting-out the fallback from the new msvc compiler to the Visual Studio compiler existing binaries",
     "core:default_profile": "Defines the default host profile ('default' by default)",
     "core:default_build_profile": "Defines the default build profile (None by default)",
@@ -21,18 +22,20 @@ BUILT_IN_CONFS = {
     "tools.cmake.cmaketoolchain:system_name": "Define CMAKE_SYSTEM_NAME in CMakeToolchain",
     "tools.cmake.cmaketoolchain:system_version": "Define CMAKE_SYSTEM_VERSION in CMakeToolchain",
     "tools.cmake.cmaketoolchain:system_processor": "Define CMAKE_SYSTEM_PROCESSOR in CMakeToolchain",
+    "tools.cmake.cmaketoolchain.presets:max_schema_version": "Generate CMakeUserPreset.json compatible with the supplied schema version",
     "tools.env.virtualenv:auto_use": "Automatically activate virtualenv file generation",
     "tools.cmake.cmake_layout:build_folder_vars": "Settings and Options that will produce a different build folder and different CMake presets names",
     "tools.files.download:retry": "Number of retries in case of failure when downloading",
     "tools.files.download:retry_wait": "Seconds to wait between download attempts",
     "tools.gnu:make_program": "Indicate path to make program",
     "tools.gnu:define_libcxx11_abi": "Force definition of GLIBCXX_USE_CXX11_ABI=1 for libstdc++11",
+    "tools.gnu:host_triplet": "Custom host triplet to pass to Autotools scripts",
     "tools.google.bazel:configs": "Define Bazel config file",
     "tools.google.bazel:bazelrc_path": "Defines Bazel rc-path",
     "tools.microsoft.msbuild:verbosity": "Verbosity level for MSBuild: 'Quiet', 'Minimal', 'Normal', 'Detailed', 'Diagnostic'",
     "tools.microsoft.msbuild:vs_version": "Defines the IDE version when using the new msvc compiler",
     "tools.microsoft.msbuild:max_cpu_count": "Argument for the /m when running msvc to build parallel projects",
-    "tools.microsoft.msbuild:installation_path": "VS install path, to avoid auto-detect via vswhere, like C:/Program Files (x86)/Microsoft Visual Studio/2019/Community",
+    "tools.microsoft.msbuild:installation_path": "VS install path, to avoid auto-detect via vswhere, like C:/Program Files (x86)/Microsoft Visual Studio/2019/Community. Use empty string to disable",
     "tools.microsoft.msbuilddeps:exclude_code_analysis": "Suppress MSBuild code analysis for patterns",
     "tools.microsoft.msbuildtoolchain:compile_options": "Dictionary with MSBuild compiler options",
     "tools.intel:installation_path": "Defines the Intel oneAPI installation root path",
@@ -45,13 +48,26 @@ BUILT_IN_CONFS = {
     "tools.apple:enable_bitcode": "(boolean) Enable/Disable Bitcode Apple Clang flags",
     "tools.apple:enable_arc": "(boolean) Enable/Disable ARC Apple Clang flags",
     "tools.apple:enable_visibility": "(boolean) Enable/Disable Visibility Apple Clang flags",
-    # Flags configuration
     "tools.build:cxxflags": "List of extra CXX flags used by different toolchains like CMakeToolchain, AutotoolsToolchain and MesonToolchain",
     "tools.build:cflags": "List of extra C flags used by different toolchains like CMakeToolchain, AutotoolsToolchain and MesonToolchain",
     "tools.build:defines": "List of extra definition flags used by different toolchains like CMakeToolchain and AutotoolsToolchain",
     "tools.build:sharedlinkflags": "List of extra flags used by CMakeToolchain for CMAKE_SHARED_LINKER_FLAGS_INIT variable",
     "tools.build:exelinkflags": "List of extra flags used by CMakeToolchain for CMAKE_EXE_LINKER_FLAGS_INIT variable",
+    "tools.build:compiler_executables": "Defines a Python dict-like with the compilers path to be used. Allowed keys {'c', 'cpp', 'cuda', 'objc', 'objcpp', 'rc', 'fortran', 'asm', 'hip', 'ispc'}",
+    "tools.build:linker_scripts": "List of linker script files to pass to the linker used by different toolchains like CMakeToolchain, AutotoolsToolchain, and MesonToolchain",
+    "tools.microsoft.bash:subsystem": "Set subsystem to use for Windows. Possible values: 'msys2', 'msys', 'cygwin', 'wsl' and 'sfu'",
+    "tools.microsoft.bash:path": "Path to the shell executable. Default: 'bash'",
+    "tools.apple:sdk_path": "Path for the sdk location. This value will be passed as SDKROOT or -isysroot depending on the generator used",
+    "tools.cmake.cmaketoolchain:toolset_arch": "Will add the ',host=xxx' specifier in the 'CMAKE_GENERATOR_TOOLSET' variable of 'conan_toolchain.cmake' file",
+    "tools.gnu:pkg_config": "Define the 'pkg_config' executable name or full path",
+    "tools.env.virtualenv:powershell": "Opt-in to generate Powershell '.ps1' scripts instead of '.bat'",
+    "tools.meson.mesontoolchain:backend": "Set the Meson backend. Possible values: 'ninja', 'vs', 'vs2010', 'vs2015', 'vs2017', 'vs2019', 'xcode'",
+    "tools.meson.mesontoolchain:extra_machine_files": "List of paths for any additional native/cross file references to be appended to the existing Conan ones",
+    "tools.files.download:download_cache": "Location for the download cache",
+    "tools.build.cross_building:can_run": "Set the return value for the 'conan.tools.build.can_run()' tool",
 }
+
+BUILT_IN_CONFS = {key: value for key, value in sorted(BUILT_IN_CONFS.items())}
 
 
 def _is_profile_module(module_name):
@@ -68,10 +84,11 @@ class _ConfVarPlaceHolder:
 
 class _ConfValue(object):
 
-    def __init__(self, name, value):
+    def __init__(self, name, value, path=False):
         self._name = name
         self._value = value
         self._value_type = type(value)
+        self._path = path
 
     def __repr__(self):
         return repr(self._value)
@@ -85,7 +102,7 @@ class _ConfValue(object):
         return self._value
 
     def copy(self):
-        return _ConfValue(self._name, self._value)
+        return _ConfValue(self._name, self._value, self._path)
 
     def dumps(self):
         if self._value is None:
@@ -151,6 +168,17 @@ class _ConfValue(object):
             raise ConanException("It's not possible to compose {} values "
                                  "and {} ones.".format(v_type.__name__, o_type.__name__))
         # TODO: In case of any other object types?
+
+    def set_relative_base_folder(self, folder):
+        if not self._path:
+            return
+        if isinstance(self._value, list):
+            self._value = [os.path.join(folder, v) if v != _ConfVarPlaceHolder else v
+                           for v in self._value]
+        if isinstance(self._value, dict):
+            self._value = {k: os.path.join(folder, v) for k, v in self._value.items()}
+        elif isinstance(self._value, str):
+            self._value = os.path.join(folder, self._value)
 
 
 class Conf:
@@ -278,6 +306,10 @@ class Conf:
         self._validate_lower_case(name)
         self._values[name] = _ConfValue(name, value)
 
+    def define_path(self, name, value):
+        self._validate_lower_case(name)
+        self._values[name] = _ConfValue(name, value, path=True)
+
     def unset(self, name):
         """
         clears the variable, equivalent to a unset or set XXX=
@@ -289,14 +321,29 @@ class Conf:
         conf_value = _ConfValue(name, {})
         self._values.setdefault(name, conf_value).update(value)
 
+    def update_path(self, name, value):
+        self._validate_lower_case(name)
+        conf_value = _ConfValue(name, {}, path=True)
+        self._values.setdefault(name, conf_value).update(value)
+
     def append(self, name, value):
         self._validate_lower_case(name)
         conf_value = _ConfValue(name, [_ConfVarPlaceHolder])
         self._values.setdefault(name, conf_value).append(value)
 
+    def append_path(self, name, value):
+        self._validate_lower_case(name)
+        conf_value = _ConfValue(name, [_ConfVarPlaceHolder], path=True)
+        self._values.setdefault(name, conf_value).append(value)
+
     def prepend(self, name, value):
         self._validate_lower_case(name)
         conf_value = _ConfValue(name, [_ConfVarPlaceHolder])
+        self._values.setdefault(name, conf_value).prepend(value)
+
+    def prepend_path(self, name, value):
+        self._validate_lower_case(name)
+        conf_value = _ConfValue(name, [_ConfVarPlaceHolder], path=True)
         self._values.setdefault(name, conf_value).prepend(value)
 
     def remove(self, name, value):
@@ -325,6 +372,10 @@ class Conf:
             if _is_profile_module(k):
                 result._values[k] = v
         return result
+
+    def set_relative_base_folder(self, folder):
+        for v in self._values.values():
+            v.set_relative_base_folder(folder)
 
 
 class ConfDefinition:

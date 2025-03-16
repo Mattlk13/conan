@@ -483,18 +483,19 @@ def test_multiple_deactivate():
     os.chmod(os.path.join(client.current_folder, "display.sh"), 0o777)
     client.run("install .")
 
-    if platform.system() == "Windows":
-        cmd = "conanbuild.bat && display.bat && deactivate_conanbuild.bat && display.bat"
-    else:
-        cmd = '. ./conanbuild.sh && ./display.sh && . ./deactivate_conanbuild.sh && ./display.sh'
-    out, _ = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              shell=True, cwd=client.current_folder).communicate()
-    out = out.decode()
-    assert "VAR1=Value1!!" in out
-    assert "VAR2=Value2!!" in out
-    assert 2 == str(out).count("Restoring environment")
-    assert "VAR1=!!" in out
-    assert "VAR2=!!" in out
+    for _ in range(2):  # Just repeat it, so we can check things keep working
+        if platform.system() == "Windows":
+            cmd = "conanbuild.bat && display.bat && deactivate_conanbuild.bat && display.bat"
+        else:
+            cmd = '. ./conanbuild.sh && ./display.sh && . ./deactivate_conanbuild.sh && ./display.sh'
+        out, _ = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  shell=True, cwd=client.current_folder).communicate()
+        out = out.decode()
+        assert "VAR1=Value1!!" in out
+        assert "VAR2=Value2!!" in out
+        assert 2 == str(out).count("Restoring environment")
+        assert "VAR1=!!" in out
+        assert "VAR2=!!" in out
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="Path problem in Windows only")
@@ -663,3 +664,104 @@ def test_skip_virtualbuildenv_run():
     # client.run("create . --name consumer --version 1.0")
     client.run("create .  consumer/1.0@ -pr:h=default -pr:b=default")
     assert "FOO is BAR" not in client.out
+
+
+def test_files_always_created():
+    """ test that even if there are no env-variables, the generators always create files,
+    they will be mostly empty, but exist
+    """
+    c = TestClient()
+    c.save({"dep/conanfile.py": GenConanfile("dep", "0.1"),
+            "consumer/conanfile.txt": "[requires]\ndep/0.1"})
+    c.run("create dep")
+    c.run("install consumer -g VirtualBuildEnv -g VirtualRunEnv")
+    ext = "bat" if platform.system() == "Windows" else "sh"
+
+    arch = c.get_default_host_profile().settings['arch']
+    assert os.path.isfile(os.path.join(c.current_folder, f"conanbuild.{ext}"))
+    assert os.path.isfile(os.path.join(c.current_folder, f"conanrun.{ext}"))
+    assert os.path.isfile(os.path.join(c.current_folder, f"conanbuildenv-release-{arch}.{ext}"))
+    assert os.path.isfile(os.path.join(c.current_folder, f"conanbuildenv-release-{arch}.{ext}"))
+
+
+def test_error_with_dots_virtualenv():
+    # https://github.com/conan-io/conan/issues/12163
+    tool = textwrap.dedent(r"""
+        from conan import ConanFile
+        class ToolConan(ConanFile):
+            name = "tool"
+            version = "0.1"
+            settings = "arch", "os"
+
+            def package_info(self):
+                self.buildenv_info.define("DUMMY", "123456")
+        """)
+    test_package = textwrap.dedent(r"""
+        from conan import ConanFile
+        import os
+
+        class ToolTestConan(ConanFile):
+            name = "app"
+            version = "0.1"
+            settings = "os", "compiler", "build_type", "arch"
+            generators = "VirtualBuildEnv"
+
+            def build_requirements(self):
+                self.tool_requires("tool/0.1")
+
+            def build(self):
+                self.run("echo DUMMY=$DUMMY")
+                self.run("set")
+            """)
+    client = TestClient()
+    client.save({"dep/conanfile.py": tool,
+                 "consumer/conanfile.py": test_package})
+
+    client.run("create dep -s arch=armv8.3")
+    client.run("create consumer -s arch=armv8.3")
+    assert "DUMMY=123456" in client.out
+
+
+def test_runenv_info_propagated():
+    """
+    A runenv_info in a recipe, which is required by an executable that is used
+    in another place as a tool_require (also its own test_package), should be
+    propagated
+    test_package --(tool_requires)->tools-(requires)->lib(defines runenv_info)
+    https://github.com/conan-io/conan/issues/12939
+    """
+    c = TestClient()
+    lib = textwrap.dedent("""
+        from conan import ConanFile
+        class Lib(ConanFile):
+            name = "lib"
+            version = "0.1"
+            settings = "build_type"
+            def package_info(self):
+                self.runenv_info.define("MYLIBVAR", f"MYLIBVALUE:{self.settings.build_type}")
+        """)
+    tool_test_package = textwrap.dedent("""
+        import platform
+        from conan import ConanFile
+        class TestTool(ConanFile):
+            settings = "build_type"
+            test_type = "explicit"
+            generators = "VirtualBuildEnv"
+            def build_requirements(self):
+                self.tool_requires(self.tested_reference_str)
+            def build(self):
+                self.output.info(f"Building TEST_PACKAGE IN {self.settings.build_type}!!")
+                if platform.system()!= "Windows":
+                    self.run("echo MYLIBVAR=$MYLIBVAR")
+                else:
+                    self.run("set MYLIBVAR")
+            def test(self):
+                pass
+        """)
+    c.save({"lib/conanfile.py": lib,
+            "tool/conanfile.py": GenConanfile("tool", "0.1").with_requires("lib/0.1"),
+            "tool/test_package/conanfile.py": tool_test_package})
+    c.run("create lib -s build_type=Release")
+    c.run("create tool --build-require -s:b build_type=Release -s:h build_type=Debug")
+    assert "tool/0.1 (test package): Building TEST_PACKAGE IN Debug!!" in c.out
+    assert "MYLIBVAR=MYLIBVALUE:Release" in c.out

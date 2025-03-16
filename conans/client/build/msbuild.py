@@ -22,11 +22,22 @@ class MSBuild(object):
 
     def __init__(self, conanfile):
         if isinstance(conanfile, ConanFile):
+            if getattr(conanfile, "must_use_new_helpers", None):
+                wrong_helper_msg = "Using the wrong 'MSBuild' helper. To use MSBuildDeps, MSBuildToolchain "\
+                                   "you should use 'from conan.tools.microsoft import MSBuild'. "\
+                                   "Set environment variable CONAN_DISABLE_STRICT_MODE=1 to override "\
+                                   "this check (should only be used to build old packages)."
+                if get_env("CONAN_DISABLE_STRICT_MODE", False):
+                    conanfile.output.warning(wrong_helper_msg)
+                else:
+                    raise ConanException(wrong_helper_msg)
             self._conanfile = conanfile
             self._settings = self._conanfile.settings
             self._output = self._conanfile.output
             self.build_env = VisualStudioBuildEnvironment(self._conanfile,
                                                           with_build_type_flags=False)
+            conanfile.output.warning(f"**** The 'from conans import MSBuild' helper is deprecated. "
+                                     "Please update your code and remove it. ****")
         else:  # backwards compatible with build_sln_command
             self._settings = conanfile
             self.build_env = None

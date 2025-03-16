@@ -2,6 +2,8 @@ import json
 import textwrap
 import unittest
 
+import pytest
+
 from conans.client.tools.env import environment_append
 from conans.test.utils.tools import TestClient, GenConanfile
 
@@ -266,3 +268,54 @@ class GraphLockBuildRequireTestCase(unittest.TestCase):
 
         client.run("create pkg/conanfile.py pkg/1.0@  --build=missing --lockfile=conan.lock")
         assert "pkg/1.0 (test package): Applying build-requirement: cmake/1.0" in client.out
+
+
+@pytest.mark.parametrize("test_requires", [True, False])
+def test_duplicated_build_host_require(test_requires):
+    c = TestClient()
+    if test_requires:
+        pkg = GenConanfile("pkg", "0.1").with_build_requirement("tool/[^4.0]",
+                                                                force_host_context=True)
+    else:
+        pkg = GenConanfile("pkg", "0.1").with_requirement("tool/[^4.0]")
+    c.save({"tool/conanfile.py": GenConanfile("tool"),
+            "pkg/conanfile.py": pkg,
+            "profile": "[tool_requires]\ntool/[^3.0]"})
+    c.run("create tool 3.0@")
+    c.run("create tool 4.0@")
+    c.run("install pkg -pr:b=default -pr:h=profile --build")
+    assert "tool/4.0 from local cache - Cache" in c.out
+    c.run("install pkg --lockfile=conan.lock")
+    assert "tool/4.0 from local cache - Cache" in c.out
+
+
+class TestTransitiveBuildRequires:
+    @pytest.fixture()
+    def client(self):
+        # https://github.com/conan-io/conan/issues/13899
+        client = TestClient()
+        client.save({"zlib/conanfile.py": GenConanfile("zlib", "1.0"),
+                     "cmake/conanfile.py": GenConanfile("cmake", "1.0").with_requires("zlib/1.0"),
+                     "pkg/conanfile.py": GenConanfile("pkg", "1.0").with_build_requires("cmake/1.0"),
+                     "consumer/conanfile.py": GenConanfile().with_requires("pkg/[>=1.0]"),
+                     })
+
+        client.run("export zlib")
+        client.run("export cmake")
+        client.run("export pkg")
+        client.run("lock create consumer/conanfile.py -pr:b=default --build "
+                   "--lockfile-out=conan.lock")
+        return client
+
+    def test_transitive_build_require(self, client):
+        # This used to crash, not anymore with the fix
+        client.run("install consumer/conanfile.py --build=missing --lockfile=conan.lock")
+        assert "zlib/1.0: Created package" in client.out
+        assert "cmake/1.0: Created package" in client.out
+        assert "pkg/1.0: Created package" in client.out
+
+    def test_transitive_build_require_intermediate(self, client):
+        # This used to crash, not anymore with the fix
+        client.run("install pkg/conanfile.py --build=missing --lockfile=conan.lock")
+        assert "zlib/1.0: Created package" in client.out
+        assert "cmake/1.0: Created package" in client.out

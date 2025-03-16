@@ -1,34 +1,31 @@
 from conan.tools._check_build_profile import check_using_build_profile
 from conan.tools._compilers import architecture_flag, build_type_flags, cppstd_flag, \
-    build_type_link_flags
+    build_type_link_flags, libcxx_flags
+from conan.tools.apple import is_apple_os
 from conan.tools.apple.apple import apple_min_version_flag, to_apple_arch, \
-    apple_sdk_path, is_apple_os
+    apple_sdk_path
 from conan.tools.build.cross_building import cross_building, get_cross_building_settings
 from conan.tools.env import Environment
 from conan.tools.files.files import save_toolchain_args
 from conan.tools.gnu.get_gnu_triplet import _get_gnu_triplet
-from conan.tools.microsoft import VCVars, is_msvc, msvc_runtime_flag
+from conan.tools.microsoft import VCVars, msvc_runtime_flag
 from conans.errors import ConanException
 from conans.tools import args_to_string
 
 
 class AutotoolsToolchain:
-    def __init__(self, conanfile, namespace=None):
+    def __init__(self, conanfile, namespace=None, prefix="/"):
         self._conanfile = conanfile
         self._namespace = namespace
-
-        self.configure_args = self._default_configure_shared_flags() + self._default_configure_install_flags()
-        self.autoreconf_args = self._default_autoreconf_flags()
-        self.make_args = []
+        self._prefix = prefix
 
         # Flags
-        self.cxxflags = []
-        self.cflags = []
-        self.ldflags = []
-        self.defines = []
+        self.extra_cxxflags = []
+        self.extra_cflags = []
+        self.extra_ldflags = []
+        self.extra_defines = []
 
         # Defines
-        self.gcc_cxx11_abi = self._get_cxx11_abi_define()
         self.ndebug = None
         build_type = self._conanfile.settings.get_safe("build_type")
         if build_type in ['Release', 'RelWithDebInfo', 'MinSizeRel']:
@@ -40,12 +37,12 @@ class AutotoolsToolchain:
 
         self.cppstd = cppstd_flag(self._conanfile.settings)
         self.arch_flag = architecture_flag(self._conanfile.settings)
-        self.libcxx = self._get_libcxx_flag()
+        self.libcxx, self.gcc_cxx11_abi = libcxx_flags(self._conanfile)
         self.fpic = self._conanfile.options.get_safe("fPIC")
         self.msvc_runtime_flag = self._get_msvc_runtime_flag()
 
-        # Cross build
-        self._host = None
+        # Cross build triplets
+        self._host = self._conanfile.conf.get("tools.gnu:host_triplet")
         self._build = None
         self._target = None
 
@@ -55,15 +52,17 @@ class AutotoolsToolchain:
         self.sysroot_flag = None
 
         if cross_building(self._conanfile):
+            # Host triplet
             os_build, arch_build, os_host, arch_host = get_cross_building_settings(self._conanfile)
             compiler = self._conanfile.settings.get_safe("compiler")
-            self._host = _get_gnu_triplet(os_host, arch_host, compiler=compiler)
+            if not self._host:
+                self._host = _get_gnu_triplet(os_host, arch_host, compiler=compiler)
+            # Build triplet
             self._build = _get_gnu_triplet(os_build, arch_build, compiler=compiler)
-
             # Apple Stuff
-            if os_build == "Macos":
+            if os_build == "Macos" and is_apple_os(self._conanfile):
                 sdk_path = apple_sdk_path(conanfile)
-                apple_arch = to_apple_arch(self._conanfile.settings.get_safe("arch"))
+                apple_arch = to_apple_arch(self._conanfile)
                 # https://man.archlinux.org/man/clang.1.en#Target_Selection_Options
                 self.apple_arch_flag = "-arch {}".format(apple_arch) if apple_arch else None
                 # -isysroot makes all includes for your library relative to the build directory
@@ -73,23 +72,13 @@ class AutotoolsToolchain:
         sysroot = sysroot.replace("\\", "/") if sysroot is not None else None
         self.sysroot_flag = "--sysroot {}".format(sysroot) if sysroot else None
 
+        self.configure_args = self._default_configure_shared_flags() + \
+                              self._default_configure_install_flags() + \
+                              self._get_triplets()
+        self.autoreconf_args = self._default_autoreconf_flags()
+        self.make_args = []
+
         check_using_build_profile(self._conanfile)
-
-    def _get_cxx11_abi_define(self):
-        # https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
-        # The default is libstdc++11, only specify the contrary '_GLIBCXX_USE_CXX11_ABI=0'
-        settings = self._conanfile.settings
-        libcxx = settings.get_safe("compiler.libcxx")
-        if not libcxx:
-            return
-
-        compiler = settings.get_safe("compiler.base") or settings.get_safe("compiler")
-        if compiler in ['clang', 'apple-clang', 'gcc']:
-            if libcxx == 'libstdc++':
-                return '_GLIBCXX_USE_CXX11_ABI=0'
-            elif libcxx == "libstdc++11" and self._conanfile.conf.get("tools.gnu:define_libcxx11_abi",
-                                                                      check_type=bool):
-                return '_GLIBCXX_USE_CXX11_ABI=1'
 
     def _get_msvc_runtime_flag(self):
         flag = msvc_runtime_flag(self._conanfile)
@@ -97,71 +86,61 @@ class AutotoolsToolchain:
             flag = "-{}".format(flag)
         return flag
 
-    def _get_libcxx_flag(self):
-        settings = self._conanfile.settings
-        libcxx = settings.get_safe("compiler.libcxx")
-        if not libcxx:
-            return
-
-        compiler = settings.get_safe("compiler.base") or settings.get_safe("compiler")
-
-        if compiler in ['clang', 'apple-clang']:
-            if libcxx in ['libstdc++', 'libstdc++11']:
-                return '-stdlib=libstdc++'
-            elif libcxx == 'libc++':
-                return '-stdlib=libc++'
-        elif compiler == 'sun-cc':
-            return ({"libCstd": "-library=Cstd",
-                     "libstdcxx": "-library=stdcxx4",
-                     "libstlport": "-library=stlport4",
-                     "libstdc++": "-library=stdcpp"}.get(libcxx))
-        elif compiler == "qcc":
-            return "-Y _%s" % str(libcxx)
-
     @staticmethod
     def _filter_list_empty_fields(v):
         return list(filter(bool, v))
 
-    def _get_extra_flags(self):
-        # Now, it's time to get all the flags defined by the user
-        cxxflags = self._conanfile.conf.get("tools.build:cxxflags", default=[], check_type=list)
-        cflags = self._conanfile.conf.get("tools.build:cflags", default=[], check_type=list)
-        sharedlinkflags = self._conanfile.conf.get("tools.build:sharedlinkflags", default=[], check_type=list)
-        exelinkflags = self._conanfile.conf.get("tools.build:exelinkflags", default=[], check_type=list)
-        defines = self._conanfile.conf.get("tools.build:defines", default=[], check_type=list)
-        return {
-            "cxxflags": cxxflags,
-            "cflags": cflags,
-            "defines": defines,
-            "ldflags": sharedlinkflags + exelinkflags
-        }
+    @property
+    def cxxflags(self):
+        fpic = "-fPIC" if self.fpic else None
+        ret = [self.libcxx, self.cppstd, self.arch_flag, fpic, self.msvc_runtime_flag,
+               self.sysroot_flag]
+        apple_flags = [self.apple_isysroot_flag, self.apple_arch_flag, self.apple_min_version_flag]
+        conf_flags = self._conanfile.conf.get("tools.build:cxxflags", default=[], check_type=list)
+        ret = ret + self.build_type_flags + apple_flags + conf_flags + self.extra_cxxflags
+        return self._filter_list_empty_fields(ret)
+
+    @property
+    def cflags(self):
+        fpic = "-fPIC" if self.fpic else None
+        ret = [self.arch_flag, fpic, self.msvc_runtime_flag, self.sysroot_flag]
+        apple_flags = [self.apple_isysroot_flag, self.apple_arch_flag, self.apple_min_version_flag]
+        conf_flags = self._conanfile.conf.get("tools.build:cflags", default=[], check_type=list)
+        ret = ret + self.build_type_flags + apple_flags + conf_flags + self.extra_cflags
+        return self._filter_list_empty_fields(ret)
+
+    @property
+    def ldflags(self):
+        ret = [self.arch_flag, self.sysroot_flag]
+        apple_flags = [self.apple_isysroot_flag, self.apple_arch_flag, self.apple_min_version_flag]
+        conf_flags = self._conanfile.conf.get("tools.build:sharedlinkflags", default=[],
+                                              check_type=list)
+        conf_flags.extend(self._conanfile.conf.get("tools.build:exelinkflags", default=[],
+                                                   check_type=list))
+        linker_scripts = self._conanfile.conf.get("tools.build:linker_scripts", default=[], check_type=list)
+        conf_flags.extend(["-T'" + linker_script + "'" for linker_script in linker_scripts])
+        ret = ret + apple_flags + conf_flags + self.build_type_link_flags + self.extra_ldflags
+        return self._filter_list_empty_fields(ret)
+
+    @property
+    def defines(self):
+        conf_flags = self._conanfile.conf.get("tools.build:defines", default=[], check_type=list)
+        ret = [self.ndebug, self.gcc_cxx11_abi] + conf_flags + self.extra_defines
+        return self._filter_list_empty_fields(ret)
 
     def environment(self):
         env = Environment()
-
-        apple_flags = [self.apple_isysroot_flag, self.apple_arch_flag, self.apple_min_version_flag]
-        fpic = "-fPIC" if self.fpic else None
-        extra_flags = self._get_extra_flags()
-
-        self.cxxflags.extend([self.libcxx, self.cppstd,
-                              self.arch_flag, fpic, self.msvc_runtime_flag, self.sysroot_flag]
-                             + self.build_type_flags + apple_flags + extra_flags["cxxflags"])
-        self.cflags.extend([self.arch_flag, fpic, self.msvc_runtime_flag, self.sysroot_flag]
-                           + self.build_type_flags + apple_flags + extra_flags["cflags"])
-        self.ldflags.extend([self.arch_flag, self.sysroot_flag] + self.build_type_link_flags
-                            + apple_flags + extra_flags["ldflags"])
-        self.defines.extend([self.ndebug, self.gcc_cxx11_abi] + extra_flags["defines"])
-
-        if is_msvc(self._conanfile):
-            env.define("CXX", "cl")
-            env.define("CC", "cl")
-
-        env.append("CPPFLAGS", ["-D{}".format(d) for d in self._filter_list_empty_fields(self.defines)])
-        env.append("CXXFLAGS", self._filter_list_empty_fields(self.cxxflags))
-        env.append("CFLAGS", self._filter_list_empty_fields(self.cflags))
-        env.append("LDFLAGS", self._filter_list_empty_fields(self.ldflags))
+        compilers_by_conf = self._conanfile.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        if compilers_by_conf:
+            compilers_mapping = {"c": "CC", "cpp": "CXX", "cuda": "NVCC", "fortran": "FC"}
+            for comp, env_var in compilers_mapping.items():
+                if comp in compilers_by_conf:
+                    env.define(env_var, compilers_by_conf[comp])
+        env.append("CPPFLAGS", ["-D{}".format(d) for d in self.defines])
+        env.append("CXXFLAGS", self.cxxflags)
+        env.append("CFLAGS", self.cflags)
+        env.append("LDFLAGS", self.ldflags)
         env.prepend_path("PKG_CONFIG_PATH", self._conanfile.generators_folder)
-
         return env
 
     def vars(self):
@@ -196,28 +175,81 @@ class AutotoolsToolchain:
             return "--{}=${{prefix}}/{}".format(argument_name, elements[0]) if elements else ""
 
         # If someone want arguments but not the defaults can pass them in args manually
-        configure_install_flags.extend(["--prefix=/",
+        configure_install_flags.extend([f"--prefix={self._prefix}",
                                        _get_argument("bindir", "bindirs"),
                                        _get_argument("sbindir", "bindirs"),
                                        _get_argument("libdir", "libdirs"),
                                        _get_argument("includedir", "includedirs"),
                                        _get_argument("oldincludedir", "includedirs"),
                                        _get_argument("datarootdir", "resdirs")])
-        return configure_install_flags
+        return [el for el in configure_install_flags if el]
 
-    def _default_autoreconf_flags(self):
+    @staticmethod
+    def _default_autoreconf_flags():
         return ["--force", "--install"]
 
-    def generate_args(self):
-        configure_args = []
-        configure_args.extend(self.configure_args)
-        user_args_str = args_to_string(self.configure_args)
-        for flag, var in (("host", self._host), ("build", self._build), ("target", self._target)):
-            if var and flag not in user_args_str:
-                configure_args.append('--{}={}'.format(flag, var))
+    def _get_triplets(self):
+        triplets = []
+        for flag, value in (("--host=", self._host), ("--build=", self._build),
+                            ("--target=", self._target)):
+            if value:
+                triplets.append(f'{flag}{value}')
+        return triplets
 
-        args = {"configure_args": args_to_string(configure_args),
+    def update_configure_args(self, updated_flags):
+        """
+        Helper to update/prune flags from ``self.configure_args``.
+
+        :param updated_flags: ``dict`` with arguments as keys and their argument values.
+                              Notice that if argument value is ``None``, this one will be pruned.
+        """
+        self._update_flags("configure_args", updated_flags)
+
+    def update_make_args(self, updated_flags):
+        """
+        Helper to update/prune arguments from ``self.make_args``.
+
+        :param updated_flags: ``dict`` with arguments as keys and their argument values.
+                              Notice that if argument value is ``None``, this one will be pruned.
+        """
+        self._update_flags("make_args", updated_flags)
+
+    def update_autoreconf_args(self, updated_flags):
+        """
+        Helper to update/prune arguments from ``self.autoreconf_args``.
+
+        :param updated_flags: ``dict`` with arguments as keys and their argument values.
+                              Notice that if argument value is ``None``, this one will be pruned.
+        """
+        self._update_flags("autoreconf_args", updated_flags)
+
+    # FIXME: Remove all these update_xxxx whenever xxxx_args are dicts or new ones replace them
+    def _update_flags(self, attr_name, updated_flags):
+
+        def _list_to_dict(flags):
+            ret = {}
+            for flag in flags:
+                # Only splitting if "=" is there
+                option = flag.split("=", 1)
+                if len(option) == 2:
+                    ret[option[0]] = option[1]
+                else:
+                    ret[option[0]] = ""
+            return ret
+
+        def _dict_to_list(flags):
+            return [f"{k}={v}" if v else k for k, v in flags.items() if v is not None]
+
+        self_args = getattr(self, attr_name)
+        # FIXME: if xxxxx_args -> dict-type at some point, all these lines could be removed
+        options = _list_to_dict(self_args)
+        # Add/update/remove the current xxxxx_args with the new flags given
+        options.update(updated_flags)
+        # Update the current ones
+        setattr(self, attr_name, _dict_to_list(options))
+
+    def generate_args(self):
+        args = {"configure_args": args_to_string(self.configure_args),
                 "make_args":  args_to_string(self.make_args),
                 "autoreconf_args": args_to_string(self.autoreconf_args)}
-
         save_toolchain_args(args, namespace=self._namespace)

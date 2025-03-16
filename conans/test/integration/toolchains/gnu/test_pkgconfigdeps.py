@@ -460,91 +460,6 @@ def test_pkg_config_name_full_aliases():
     assert "Requires: compo1" == get_requires_from_content(pc_content)
 
 
-def test_duplicated_names_warnings():
-    """
-    Testing some WARN messages if there are duplicated pkg_config_name/pkg_config_aliases defined
-
-    Scenario: consumer -> pkga/1.0 -> pkgb/1.0
-    Expected WARN cases:
-        - Duplicated aliases.
-        - Duplicated names, alias and component name
-        - Duplicated components names.
-        - Duplicated package and component name.
-        - Duplicated names between different dependencies.
-    """
-    client = TestClient()
-    conanfile = textwrap.dedent("""
-        from conan import ConanFile
-
-        class Recipe(ConanFile):
-
-            def package_info(self):
-                self.cpp_info.set_property("pkg_config_name", "libpkg")
-                # Duplicated components
-                self.cpp_info.components["cmp1"].set_property("pkg_config_name", "component1")
-                self.cpp_info.components["cmp2"].set_property("pkg_config_name", "component1")
-                # Duplicated package and component name
-                self.cpp_info.components["cmp3"].set_property("pkg_config_name", "libpkg")
-    """)
-    client.save({"conanfile.py": conanfile})
-    client.run("create . pkgb/1.0@")
-
-    conanfile = textwrap.dedent("""
-        from conan import ConanFile
-
-        class PkgConfigConan(ConanFile):
-            requires = "pkgb/1.0"
-
-            def package_info(self):
-                # Duplicated name as pkgb
-                self.cpp_info.set_property("pkg_config_name", "libpkg")
-                self.cpp_info.components["cmp1"].requires.append("pkgb::cmp1")
-                self.cpp_info.components["cmp1"].set_property("pkg_config_name", "component1")
-                # Duplicated aliases
-                self.cpp_info.components["cmp2"].set_property("pkg_config_aliases", ["alias1"])
-                self.cpp_info.components["cmp3"].set_property("pkg_config_aliases", ["alias1"])
-                # Duplicated names, alias and component name
-                self.cpp_info.components["cmp2"].set_property("pkg_config_name", "libcmp")
-                self.cpp_info.components["cmp4"].set_property("pkg_config_aliases", ["libcmp"])
-        """)
-    client.save({"conanfile.py": conanfile}, clean_first=True)
-    client.run("create . pkga/1.0@")
-
-    conanfile = textwrap.dedent("""
-        [requires]
-        pkga/1.0
-
-        [generators]
-        PkgConfigDeps
-        """)
-    client.save({"conanfile.txt": conanfile}, clean_first=True)
-    client.run("install .")
-    output = client.out
-    # Duplicated aliases from pkga
-    assert "WARN: [pkga/1.0] The PC alias name alias1.pc already exists and it matches with " \
-           "another alias one" in output
-    # Duplicated names, alias and component name from pkga
-    # Issue related: https://github.com/conan-io/conan/issues/10341
-    assert "WARN: [pkga/1.0] The PC alias name libcmp.pc already exists and it matches with " \
-           "another package/component one" in output
-    # Duplicated components from pkgb
-    assert "WARN: [pkgb/1.0] The PC component name component1.pc already exists and it matches " \
-           "with another component one" in output
-    # Duplicated package and component name from pkgb
-    assert "WARN: [pkgb/1.0] The PC package name libpkg.pc already exists and it matches with " \
-           "another component one" in output
-    # Duplicated names between pkgb and pkga
-    assert "WARN: [pkgb/1.0] The PC file name component1.pc already exists and it matches with " \
-           "another name/alias declared in pkga/1.0 package" in output
-    assert "WARN: [pkgb/1.0] The PC file name libpkg.pc already exists and it matches with " \
-           "another name/alias declared in pkga/1.0 package" in output
-    pc_files = [os.path.basename(i) for i in glob.glob(os.path.join(client.current_folder, '*.pc'))]
-    pc_files.sort()
-    # Let's check all the PC file names created just in case
-    assert pc_files == ['alias1.pc', 'component1.pc', 'libcmp.pc', 'libpkg-cmp3.pc',
-                        'libpkg-cmp4.pc', 'libpkg.pc']
-
-
 def test_components_and_package_pc_creation_order():
     """
     Testing if the root package PC file name matches with any of the components one, the first one
@@ -607,23 +522,279 @@ def test_pkgconfigdeps_with_test_requires():
     Related issue: https://github.com/conan-io/conan/issues/11376
     """
     client = TestClient()
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+        class Pkg(ConanFile):
+            def package_info(self):
+                self.cpp_info.libs = ["lib%s"]
+        """)
     with client.chdir("app"):
-        client.run("new app/1.0 -m cmake_lib")
-        # client.run("new cmake_lib -d name=app -d version=1.0")
-        client.run("create .")
+        client.save({"conanfile.py": conanfile % "app"})
+        # client.run("create . --name=app --version=1.0")
+        client.run("create . app/1.0@")
     with client.chdir("test"):
-        client.run("new test/1.0 -m cmake_lib")
-        # client.run("new cmake_lib -d name=test -d version=1.0")
-        client.run("create .")
+        client.save({"conanfile.py": conanfile % "test"})
+        # client.run("create . --name=test --version=1.0")
+        client.run("create . test/1.0@")
     # Create library having build and test requires
-    conanfile = textwrap.dedent(r'''
+    conanfile = textwrap.dedent("""
         from conan import ConanFile
         class HelloLib(ConanFile):
             def build_requirements(self):
                 self.test_requires('app/1.0')
                 self.test_requires('test/1.0')
-        ''')
+        """)
     client.save({"conanfile.py": conanfile}, clean_first=True)
     client.run("install . -g PkgConfigDeps")
     assert "Description: Conan package: test" in client.load("test.pc")
     assert "Description: Conan package: app" in client.load("app.pc")
+
+
+def test_with_editable_layout():
+    """
+    https://github.com/conan-io/conan/issues/11435
+    """
+    client = TestClient()
+    dep = textwrap.dedent("""
+        from conan import ConanFile
+        from conan.tools.files import save
+        class Dep(ConanFile):
+            name = "dep"
+            version = "0.1"
+            def layout(self):
+                self.cpp.source.includedirs = ["include"]
+            def package_info(self):
+                self.cpp_info.libs = ["mylib"]
+        """)
+    client.save({"dep/conanfile.py": dep,
+                 "dep/include/header.h": "",
+                 "pkg/conanfile.py": GenConanfile("pkg", "0.1").with_requires("dep/0.1")})
+    client.run("create dep")
+    client.run("editable add dep dep/0.1")
+    with client.chdir("pkg"):
+        client.run("install . -g PkgConfigDeps")
+        pc = client.load("dep.pc")
+        assert "Libs: -lmylib" in pc
+        assert 'includedir1=' in pc
+        assert 'Cflags: -I"${includedir1}"' in pc
+
+
+def test_tool_requires():
+    """
+    Testing if PC files are created for tool requires if build_context_activated/_suffix is used.
+
+    Issue related: https://github.com/conan-io/conan/issues/11710
+    """
+    client = TestClient()
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class PkgConfigConan(ConanFile):
+
+            def package_info(self):
+                self.cpp_info.libs = ["libtool"]
+        """)
+    client.save({"conanfile.py": conanfile})
+    client.run("create . tool/1.0@")
+
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class PkgConfigConan(ConanFile):
+
+            def package_info(self):
+                self.cpp_info.set_property("pkg_config_name", "libother")
+                self.cpp_info.components["cmp1"].libs = ["other_cmp1"]
+                self.cpp_info.components["cmp1"].set_property("pkg_config_name", "component1")
+                self.cpp_info.components["cmp2"].libs = ["other_cmp2"]
+                self.cpp_info.components["cmp3"].requires.append("cmp1")
+                self.cpp_info.components["cmp3"].set_property("pkg_config_name", "component3")
+        """)
+    client.save({"conanfile.py": conanfile}, clean_first=True)
+    client.run("create . other/1.0@")
+
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+        from conan.tools.gnu import PkgConfigDeps
+
+        class PkgConfigConan(ConanFile):
+            name = "demo"
+            version = "1.0"
+
+            def build_requirements(self):
+                self.build_requires("tool/1.0")
+                self.build_requires("other/1.0")
+
+            def generate(self):
+                tc = PkgConfigDeps(self)
+                tc.build_context_activated = ["other", "tool"]
+                tc.build_context_suffix = {"tool": "_bt", "other": "_bo"}
+                tc.generate()
+        """)
+    client.save({"conanfile.py": conanfile}, clean_first=True)
+    client.run("install . -pr:h default -pr:b default")
+    pc_files = [os.path.basename(i) for i in glob.glob(os.path.join(client.current_folder, '*.pc'))]
+    pc_files.sort()
+    # Let's check all the PC file names created just in case
+    assert pc_files == ['component1_bo.pc', 'component3_bo.pc',
+                        'libother_bo-cmp2.pc', 'libother_bo.pc', 'tool_bt.pc']
+    pc_content = client.load("tool_bt.pc")
+    assert "Name: tool_bt" in pc_content
+    pc_content = client.load("libother_bo.pc")
+    assert "Name: libother_bo" in pc_content
+    assert "Requires: component1_bo libother_bo-cmp2 component3_bo" == get_requires_from_content(pc_content)
+    pc_content = client.load("component1_bo.pc")
+    assert "Name: component1_bo" in pc_content
+    pc_content = client.load("libother_bo-cmp2.pc")
+    assert "Name: libother_bo-cmp2" in pc_content
+    pc_content = client.load("component3_bo.pc")
+    assert "Name: component3_bo" in pc_content
+    assert "Requires: component1_bo" == get_requires_from_content(pc_content)
+
+
+def test_tool_requires_not_created_if_no_activated():
+    """
+    Testing if there are no PC files created in no context are activated
+    """
+    client = TestClient()
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class PkgConfigConan(ConanFile):
+
+            def package_info(self):
+                self.cpp_info.libs = ["libtool"]
+        """)
+    client.save({"conanfile.py": conanfile})
+    client.run("create . tool/1.0@")
+
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class PkgConfigConan(ConanFile):
+            name = "demo"
+            version = "1.0"
+            generators = "PkgConfigDeps"
+
+            def build_requirements(self):
+                self.build_requires("tool/1.0")
+
+        """)
+    client.save({"conanfile.py": conanfile}, clean_first=True)
+    client.run("install . -pr:h default -pr:b default")
+    pc_files = [os.path.basename(i) for i in glob.glob(os.path.join(client.current_folder, '*.pc'))]
+    pc_files.sort()
+    assert pc_files == []
+
+
+def test_tool_requires_raise_exception_if_exist_both_require_and_build_one():
+    """
+    Testing if same dependency exists in both require and build require (without suffix)
+    """
+    client = TestClient()
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class PkgConfigConan(ConanFile):
+
+            def package_info(self):
+                self.cpp_info.libs = ["libtool"]
+        """)
+    client.save({"conanfile.py": conanfile})
+    client.run("create . tool/1.0@")
+
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+        from conan.tools.gnu import PkgConfigDeps
+
+        class PkgConfigConan(ConanFile):
+            name = "demo"
+            version = "1.0"
+
+            def requirements(self):
+                self.requires("tool/1.0")
+
+            def build_requirements(self):
+                self.build_requires("tool/1.0")
+
+            def generate(self):
+                tc = PkgConfigDeps(self)
+                tc.build_context_activated = ["tool"]
+                tc.generate()
+        """)
+    client.save({"conanfile.py": conanfile}, clean_first=True)
+    client.run("install . -pr:h default -pr:b default", assert_error=True)
+    assert "The packages ['tool'] exist both as 'require' and as 'build require'" in client.out
+
+
+def test_error_missing_pc_build_context():
+    """
+    PkgConfigDeps was failing, not generating the zlib.pc in the
+    build context, for a test_package that both requires(example/1.0) and
+    tool_requires(example/1.0), which depends on zlib
+    # https://github.com/conan-io/conan/issues/12664
+    """
+    c = TestClient()
+    example = textwrap.dedent("""
+        import os
+        from conan import ConanFile
+        class Example(ConanFile):
+            name = "example"
+            version = "1.0"
+            requires = "game/1.0"
+            generators = "PkgConfigDeps"
+            settings = "build_type"
+            def build(self):
+                assert os.path.exists("math.pc")
+                assert os.path.exists("engine.pc")
+                assert os.path.exists("game.pc")
+            """)
+    c.save({"math/conanfile.py": GenConanfile("math", "1.0").with_settings("build_type"),
+            "engine/conanfile.py": GenConanfile("engine", "1.0").with_settings("build_type")
+                                                                .with_require("math/1.0"),
+            "game/conanfile.py": GenConanfile("game", "1.0").with_settings("build_type")
+                                                            .with_requires("engine/1.0"),
+            "example/conanfile.py": example,
+            "example/test_package/conanfile.py": GenConanfile().with_requires("example/1.0")
+                                                               .with_build_requires("example/1.0")
+                                                               .with_test("pass")})
+    c.run("create math")
+    c.run("create engine")
+    c.run("create game")
+    # This used to crash because of the assert inside the build() method
+    c.run("create example -pr:b=default -pr:h=default")
+    # Now make sure we can actually build with build!=host context
+    # The debug binaries are missing, so adding --build=missing
+    c.run("create example -pr:b=default -pr:h=default -s:h build_type=Debug --build=missing "
+          "--build=example")
+
+    assert "example/1.0: Package '5949422937e5ea462011eb7f38efab5745e4b832' created" in c.out
+    assert "example/1.0: Package '03ed74784e8b09eda4f6311a2f461897dea57a7e' created" in c.out
+
+
+def test_pkg_config_deps_and_private_deps():
+    """
+    Testing that no errors are raised when the dependency tree has a private one in the middle
+    of it.
+
+    Issue related: https://github.com/conan-io/conan/issues/15311
+    """
+    client = TestClient()
+    client.save({"conanfile.py": GenConanfile("private", "0.1")})
+    client.run("create .")
+    client.save({"conanfile.py": GenConanfile("pkg", "0.1")
+                .with_require("private/0.1", private=True)}, clean_first=True)
+    client.run("create .")
+    conanfile = textwrap.dedent("""
+    from conan import ConanFile
+    class ConsumerConan(ConanFile):
+        settings = "os", "compiler", "build_type", "arch"
+        generators = "PkgConfigDeps"
+
+        def requirements(self):
+            self.requires("pkg/0.1")
+    """)
+    client.save({"conanfile.py": conanfile}, clean_first=True)
+    # Now, it passes and creates the pc files correctly (the skipped one is not created)
+    client.run("install .")
+    assert "Requires:" not in client.load("pkg.pc")

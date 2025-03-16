@@ -64,7 +64,8 @@ def test_transitive_multi(client):
         # to skip finding first possible FindBye somewhere
         assert "find_dependency(${_DEPENDENCY} REQUIRED ${${_DEPENDENCY}_FIND_MODE})" \
                in client.load("libb-config.cmake")
-        assert 'set(liba_FIND_MODE "NO_MODULE")' in client.load("libb-release-x86_64-data.cmake")
+        arch = client.get_default_host_profile().settings['arch']
+        assert 'set(liba_FIND_MODE "NO_MODULE")' in client.load(f"libb-release-{arch}-data.cmake")
 
         if platform.system() == "Windows":
             client.run_command('cmake .. -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake')
@@ -141,10 +142,15 @@ def test_system_libs():
         message("Libraries to Link debug: ${Test_LIBS_DEBUG}")
         get_target_property(tmp Test::Test INTERFACE_LINK_LIBRARIES)
         message("Target libs: ${tmp}")
+        get_target_property(tmp CONAN_LIB::Test_lib1_%s INTERFACE_LINK_LIBRARIES)
+        message("Micro-target libs: ${tmp}")
+        get_target_property(tmp Test_DEPS_TARGET INTERFACE_LINK_LIBRARIES)
+        message("Micro-target deps: ${tmp}")
         """)
 
     for build_type in ["Release", "Debug"]:
-        client.save({"conanfile.txt": conanfile, "CMakeLists.txt": cmakelists}, clean_first=True)
+        client.save({"conanfile.txt": conanfile,
+                     "CMakeLists.txt": cmakelists % build_type.upper()}, clean_first=True)
         client.run("install conanfile.txt -s build_type=%s" % build_type)
         client.run_command('cmake . -DCMAKE_BUILD_TYPE={0}'.format(build_type))
 
@@ -153,13 +159,140 @@ def test_system_libs():
         if build_type == "Release":
             assert "System libs release: %s" % library_name in client.out
             assert "Libraries to Link release: lib1" in client.out
-            target_libs = "$<$<CONFIG:Release>:;CONAN_LIB::Test_lib1_RELEASE;sys1;>"
         else:
             assert "System libs debug: %s" % library_name in client.out
             assert "Libraries to Link debug: lib1" in client.out
-            target_libs = "$<$<CONFIG:Debug>:;CONAN_LIB::Test_lib1_DEBUG;sys1d;>"
 
-        assert "Target libs: %s" % target_libs in client.out
+        assert f"Target libs: $<$<CONFIG:{build_type}>:>;$<$<CONFIG:{build_type}>:CONAN_LIB::Test_lib1_{build_type.upper()}>" in client.out
+        assert "Micro-target libs: Test_DEPS_TARGET" in client.out
+        micro_target_deps = f"Micro-target deps: $<$<CONFIG:{build_type}>:>;$<$<CONFIG:{build_type}>:{library_name}>;" \
+                            f"$<$<CONFIG:{build_type}>:>"
+        assert micro_target_deps in client.out
+
+
+@pytest.mark.tool_cmake
+def test_system_libs_no_libs():
+    """If the recipe doesn't declare cpp_info.libs then the target with the system deps, frameworks
+       and transitive deps has to be linked to the global target"""
+    conanfile = textwrap.dedent("""
+        from conans import ConanFile
+        from conans.tools import save
+        import os
+
+        class Test(ConanFile):
+            name = "Test"
+            version = "0.1"
+            settings = "build_type"
+
+            def package_info(self):
+                if self.settings.build_type == "Debug":
+                    self.cpp_info.system_libs.append("sys1d")
+                else:
+                    self.cpp_info.system_libs.append("sys1")
+        """)
+    client = TestClient()
+    client.save({"conanfile.py": conanfile})
+    client.run("create . -s build_type=Release")
+    client.run("create . -s build_type=Debug")
+
+    conanfile = textwrap.dedent("""
+        [requires]
+        Test/0.1
+
+        [generators]
+        CMakeDeps
+        """)
+    cmakelists = textwrap.dedent("""
+        cmake_minimum_required(VERSION 3.15)
+        project(consumer NONE)
+        set(CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR})
+        set(CMAKE_MODULE_PATH ${CMAKE_BINARY_DIR})
+        find_package(Test)
+        message("System libs Release: ${Test_SYSTEM_LIBS_RELEASE}")
+        message("Libraries to Link release: ${Test_LIBS_RELEASE}")
+        message("System libs Debug: ${Test_SYSTEM_LIBS_DEBUG}")
+        message("Libraries to Link debug: ${Test_LIBS_DEBUG}")
+        get_target_property(tmp Test::Test INTERFACE_LINK_LIBRARIES)
+        message("Target libs: ${tmp}")
+        get_target_property(tmp Test_DEPS_TARGET INTERFACE_LINK_LIBRARIES)
+        message("DEPS TARGET: ${tmp}")
+
+        """)
+
+    for build_type in ["Release", "Debug"]:
+        client.save({"conanfile.txt": conanfile, "CMakeLists.txt": cmakelists}, clean_first=True)
+        client.run("install conanfile.txt -s build_type=%s" % build_type)
+        client.run_command('cmake . -DCMAKE_BUILD_TYPE={0}'.format(build_type))
+
+        library_name = "sys1d" if build_type == "Debug" else "sys1"
+
+        assert f"System libs {build_type}: {library_name}" in client.out
+        assert f"Target libs: $<$<CONFIG:{build_type}>:>;$<$<CONFIG:{build_type}>:>;Test_DEPS_TARGET" in client.out
+        assert f"DEPS TARGET: $<$<CONFIG:{build_type}>:>;" \
+               f"$<$<CONFIG:{build_type}>:{library_name}>" in client.out
+
+
+@pytest.mark.tool_cmake
+def test_system_libs_components_no_libs():
+    """If the recipe doesn't declare cpp_info.libs then the target with the system deps, frameworks
+       and transitive deps has to be linked to the component target"""
+    conanfile = textwrap.dedent("""
+        from conans import ConanFile
+        from conans.tools import save
+        import os
+
+        class Test(ConanFile):
+            name = "Test"
+            version = "0.1"
+            settings = "build_type"
+
+            def package_info(self):
+                if self.settings.build_type == "Debug":
+                    self.cpp_info.components["foo"].system_libs.append("sys1d")
+                else:
+                    self.cpp_info.components["foo"].system_libs.append("sys1")
+        """)
+    client = TestClient()
+    client.save({"conanfile.py": conanfile})
+    client.run("create . -s build_type=Release")
+    client.run("create . -s build_type=Debug")
+
+    conanfile = textwrap.dedent("""
+        [requires]
+        Test/0.1
+
+        [generators]
+        CMakeDeps
+        """)
+    cmakelists = textwrap.dedent("""
+        cmake_minimum_required(VERSION 3.15)
+        project(consumer NONE)
+        set(CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR})
+        set(CMAKE_MODULE_PATH ${CMAKE_BINARY_DIR})
+        find_package(Test)
+        message("System libs Release: ${Test_Test_foo_SYSTEM_LIBS_RELEASE}")
+        message("Libraries to Link release: ${Test_Test_foo_LIBS_RELEASE}")
+        message("System libs Debug: ${Test_Test_foo_SYSTEM_LIBS_DEBUG}")
+        message("Libraries to Link debug: ${Test_Test_foo_LIBS_DEBUG}")
+
+        get_target_property(tmp Test::foo INTERFACE_LINK_LIBRARIES)
+        message("Target libs: ${tmp}")
+        get_target_property(tmp Test_Test_foo_DEPS_TARGET INTERFACE_LINK_LIBRARIES)
+        message("DEPS TARGET: ${tmp}")
+
+        """)
+
+    for build_type in ["Release", "Debug"]:
+        client.save({"conanfile.txt": conanfile, "CMakeLists.txt": cmakelists}, clean_first=True)
+        client.run("install conanfile.txt -s build_type=%s" % build_type)
+        client.run_command('cmake . -DCMAKE_BUILD_TYPE={0}'.format(build_type))
+
+        library_name = "sys1d" if build_type == "Debug" else "sys1"
+
+        assert f"System libs {build_type}: {library_name}" in client.out
+        assert f"Target libs: $<$<CONFIG:{build_type}>:>;$<$<CONFIG:{build_type}>:>;Test_Test_foo_DEPS_TARGET" in client.out
+        assert f"DEPS TARGET: $<$<CONFIG:{build_type}>:>;" \
+               f"$<$<CONFIG:{build_type}>:{library_name}>" in client.out
 
 
 @pytest.mark.tool_cmake
@@ -226,13 +359,13 @@ def test_custom_configuration(client):
                cmake.build_context_suffix["liba"] = "_build"
                cmake.generate()
        """)
-
+    host_arch = client.get_default_host_profile().settings['arch']
     client.save({"conanfile.py": conanfile})
     client.run("install . -pr:h default -s:b build_type=RelWithDebInfo"
                " -pr:b default -s:b arch=x86 --build missing")
     curdir = client.current_folder
     data_name_context_build = "liba_build-relwithdebinfo-x86-data.cmake"
-    data_name_context_host = "liba-debug-x86_64-data.cmake"
+    data_name_context_host = f"liba-debug-{host_arch}-data.cmake"
     assert os.path.exists(os.path.join(curdir, data_name_context_build))
     assert os.path.exists(os.path.join(curdir, data_name_context_host))
 
@@ -364,7 +497,7 @@ def test_system_dep():
     files = pkg_cmake("mylib", "0.1", requires=["zlib/0.1"])
     files["CMakeLists.txt"] = files["CMakeLists.txt"].replace("find_package(zlib)",
                                                               "find_package(ZLIB)")
-    files["CMakeLists.txt"] = files["CMakeLists.txt"].replace("zlib::zlib","ZLIB::ZLIB")
+    files["CMakeLists.txt"] = files["CMakeLists.txt"].replace("zlib::zlib", "ZLIB::ZLIB")
     client.save({os.path.join("mylib", name): content for name, content in files.items()})
     files = pkg_cmake("consumer", "0.1", requires=["mylib/0.1"])
     client.save({os.path.join("consumer", name): content for name, content in files.items()})
@@ -375,7 +508,8 @@ def test_system_dep():
 
     client.run("install consumer")
     if platform.system() != "Windows":
-        data = os.path.join("consumer/build/generators/mylib-release-x86_64-data.cmake")
+        host_arch = client.get_default_host_profile().settings['arch']
+        data = f"consumer/build/Release/generators/mylib-release-{host_arch}-data.cmake"
         contents = client.load(data)
         assert 'set(ZLIB_FIND_MODE "")' in contents
 
@@ -440,3 +574,125 @@ def test_error_missing_build_type():
     run_app = r".\Release\app.exe" if platform.system() == "Windows" else "./Release/app"
     client.run_command(run_app)
     assert "Hello World Release!" in client.out
+
+
+@pytest.mark.tool_cmake
+def test_map_imported_config():
+    # https://github.com/conan-io/conan/issues/12041
+
+    client = TestClient()
+    client.run("new hello/1.0 -m=cmake_lib")
+    client.run("create . -tf=None -s build_type=Release")
+
+    # It is necessary a 2-level test to make the fixes evident
+    talk_cpp = gen_function_cpp(name="talk", includes=["hello"], calls=["hello"])
+    talk_h = gen_function_h(name="talk")
+    conanfile = textwrap.dedent("""
+        import os
+        from conan import ConanFile
+        from conan.tools.cmake import CMake
+        from conan.tools.files import copy
+        class HelloConan(ConanFile):
+            name = 'talk'
+            version = '1.0'
+            exports_sources = "*"
+            generators = "CMakeDeps", "CMakeToolchain"
+            requires = ("hello/1.0", )
+            settings = "os", "compiler", "arch", "build_type"
+
+            def build(self):
+                cmake = CMake(self)
+                cmake.configure()
+                cmake.build()
+
+            def package(self):
+                cmake = CMake(self)
+                cmake.install()
+
+            def package_info(self):
+                self.cpp_info.libs.append("talk")
+        """)
+
+    client.save({"conanfile.py": conanfile,
+                 "CMakeLists.txt": gen_cmakelists(libname="talk",
+                                                  libsources=["talk.cpp"], find_package=["hello"],
+                                                  install=True, public_header="talk.h"),
+                 "talk.cpp": talk_cpp,
+                 "talk.h": talk_h}, clean_first=True)
+    client.run("create . -tf=None -s build_type=Release")
+
+    conanfile = textwrap.dedent("""
+        [requires]
+        talk/1.0
+        [generators]
+        CMakeDeps
+        CMakeToolchain
+        """)
+
+    cmakelists = textwrap.dedent("""
+        cmake_minimum_required(VERSION 3.15)
+        project(app)
+        set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
+        find_package(talk REQUIRED)
+        add_executable(app main.cpp)
+        target_link_libraries(app talk::talk)
+        """)
+
+    client.save({
+        "conanfile.txt": conanfile,
+        "main.cpp": gen_function_cpp(name="main", includes=["talk"], calls=["talk"]),
+        "CMakeLists.txt": cmakelists
+    }, clean_first=True)
+
+    client.run("install . -s build_type=Release")
+    if platform.system() != "Windows":
+        client.run_command("cmake . -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake "
+                           "-DCMAKE_BUILD_TYPE=DEBUG")
+        client.run_command("cmake --build .")
+        client.run_command("./app")
+    else:
+        client.run_command("cmake . -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake")
+        client.run_command("cmake --build . --config Debug")
+        client.run_command("Debug\\app.exe")
+    assert "hello/1.0: Hello World Release!" in client.out
+    assert "talk: Release!" in client.out
+    assert "main: Debug!" in client.out
+
+
+@pytest.mark.tool_cmake
+def test_quiet():
+    conanfile = textwrap.dedent("""
+        from conan import ConanFile
+
+        class Test(ConanFile):
+            name = "test"
+            version = "0.1"
+
+            def package_info(self):
+                self.cpp_info.system_libs = ["lib1"]
+        """)
+    client = TestClient()
+    client.save({"conanfile.py": conanfile})
+    client.run("create .")
+
+    conanfile = textwrap.dedent("""
+        [requires]
+        test/0.1
+
+        [generators]
+        CMakeDeps
+        """)
+    cmakelists = textwrap.dedent("""
+        cmake_minimum_required(VERSION 3.15)
+        project(consumer NONE)
+        set(CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR})
+        set(CMAKE_MODULE_PATH ${CMAKE_BINARY_DIR})
+        find_package(test QUIET)
+        """)
+
+    client.save({"conanfile.txt": conanfile,
+                 "CMakeLists.txt": cmakelists}, clean_first=True)
+    client.run("install .")
+    client.run_command('cmake . -DCMAKE_BUILD_TYPE=Release')
+    # Because we used QUIET, not in output
+    assert "Target declared 'test::test'" not in client.out

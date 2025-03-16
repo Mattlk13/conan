@@ -144,7 +144,7 @@ class _CppInfo(object):
 
     def _filter_paths(self, paths):
         abs_paths = [os.path.join(self.rootpath, p)
-                     if not os.path.isabs(p) else p for p in paths]
+                     if not os.path.isabs(p) else p for p in paths if p is not None]
         if self.filter_empty:
             return [p for p in abs_paths if os.path.isdir(p)]
         else:
@@ -400,14 +400,6 @@ class CppInfo(_CppInfo):
 
         def _check_components_requires_instersection(comp_requires):
             reqs = [it.split(COMPONENT_SCOPE)[0] for it in comp_requires if COMPONENT_SCOPE in it]
-            # Raise on components requires without package requires
-            for pkg_require in pkg_requires:
-                if package_requires[pkg_require].private or package_requires[pkg_require].override:
-                    # Not standard requires, skip
-                    continue
-                if pkg_require not in reqs:
-                    raise ConanException("Package require '%s' not used in components requires"
-                                         % pkg_require)
             # Raise on components requires requiring inexistent package requires
             for comp_require in reqs:
                 reason = None
@@ -608,8 +600,15 @@ class DepCppInfo(object):
                             del components[comp_name]
                             break
                     else:
+                        dset = set()
+                        for comp_name, comp in components.items():
+                            for dep_name, dep in components.items():
+                                for require in self._filter_component_requires(dep.requires):
+                                    if require == comp_name:
+                                        dset.add("   {} requires {}".format(dep_name, comp_name))
+                        dep_mesg = "\n".join(dset)
                         raise ConanException("There is a dependency loop in "
-                                             "'self.cpp_info.components' requires")
+                                "'self.cpp_info.components' requires:\n{}".format(dep_mesg))
                 self._sorted_components = ordered
             else:  # If components do not have requirements, keep them in the same order
                 self._sorted_components = self._cpp_info.components

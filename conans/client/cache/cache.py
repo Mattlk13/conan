@@ -5,6 +5,7 @@ from collections import OrderedDict
 
 from jinja2 import Environment, select_autoescape, FileSystemLoader, ChoiceLoader, Template
 
+from conan import conan_version
 from conans.assets.templates import dict_loader
 from conans.client.cache.editable import EditablePackages
 from conans.client.cache.remote_registry import RemoteRegistry
@@ -170,7 +171,11 @@ class ClientCache(object):
             self._new_config = ConfDefinition()
             if os.path.exists(self.new_config_path):
                 text = load(self.new_config_path)
-                content = Template(text).render({"platform": platform, "os": os})
+                distro = None
+                if platform.system() in ["Linux", "FreeBSD"]:
+                    import distro
+                content = Template(text).render({"platform": platform, "os": os, "distro": distro,
+                                                 "conan_version": conan_version})
                 self._new_config.loads(content)
         return self._new_config
 

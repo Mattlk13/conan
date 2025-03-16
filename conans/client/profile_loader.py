@@ -4,6 +4,7 @@ from collections import OrderedDict, defaultdict
 
 from jinja2 import Environment, FileSystemLoader
 
+from conan import conan_version
 from conan.tools.env.environment import ProfileEnvironment
 from conans.errors import ConanException, ConanV2Exception
 from conans.model.conf import ConfDefinition
@@ -124,7 +125,8 @@ def read_profile(profile_name, cwd, default_folder):
         base_path = os.path.dirname(profile_path)
         context = {"platform": platform,
                    "os": os,
-                   "profile_dir": base_path}
+                   "profile_dir": base_path,
+                   "conan_version": conan_version}
         rtemplate = Environment(loader=FileSystemLoader(base_path)).from_string(text)
         text = rtemplate.render(context)
 
@@ -162,7 +164,7 @@ def _load_profile(text, profile_path, default_folder):
         # Current profile before update with parents (but parent variables already applied)
         doc = ConfigParser(profile_parser.profile_text,
                            allowed_fields=["build_requires", "tool_requires", "settings", "env",
-                                           "options", "conf", "buildenv"])
+                                           "options", "conf", "buildenv", "runenv"])
 
         # Merge the inherited profile with the readed from current profile
         _apply_inner_profile(doc, inherited_profile)
@@ -244,6 +246,10 @@ def _apply_inner_profile(doc, base_profile):
     if doc.buildenv:
         buildenv = ProfileEnvironment.loads(doc.buildenv)
         base_profile.buildenv.update_profile_env(buildenv)
+
+    if doc.runenv:
+        runenv = ProfileEnvironment.loads(doc.runenv)
+        base_profile.runenv.update_profile_env(runenv)
 
 
 def profile_from_args(profiles, settings, options, env, conf, cwd, cache, build_profile=False):

@@ -29,6 +29,7 @@ def conanfile():
     c.settings.compiler.libcxx = "libstdc++"
     c.settings.os = "Windows"
     c.conf = Conf()
+    c.conf.define("tools.cmake.cmaketoolchain:system_name", "potato")
     c.folders.set_base_generators(".")
     c._conan_node = Mock()
     c._conan_node.dependencies = []
@@ -38,29 +39,29 @@ def conanfile():
 def test_cmake_toolchain(conanfile):
     toolchain = CMakeToolchain(conanfile)
     content = toolchain.content
-    assert 'set(CMAKE_C_COMPILER clang)' in content
+    assert 'set(CMAKE_SYSTEM_NAME potato)' in content
 
 
 def test_remove(conanfile):
     toolchain = CMakeToolchain(conanfile)
     toolchain.blocks.remove("generic_system")
     content = toolchain.content
-    assert 'CMAKE_C_COMPILER' not in content
+    assert 'CMAKE_SYSTEM_NAME' not in content
 
 
 def test_template_remove(conanfile):
     toolchain = CMakeToolchain(conanfile)
     toolchain.blocks["generic_system"].template = ""
     content = toolchain.content
-    assert 'CMAKE_C_COMPILER' not in content
+    assert 'CMAKE_SYSTEM_NAME' not in content
 
 
 def test_template_change(conanfile):
     toolchain = CMakeToolchain(conanfile)
     tmp = toolchain.blocks["generic_system"].template
-    toolchain.blocks["generic_system"].template = tmp.replace("CMAKE_C_COMPILER", "OTHER_THING")
+    toolchain.blocks["generic_system"].template = tmp.replace("CMAKE_SYSTEM_NAME", "OTHER_THING")
     content = toolchain.content
-    assert 'set(OTHER_THING clang)' in content
+    assert 'set(OTHER_THING potato)' in content
 
 
 def test_context_change(conanfile):
@@ -69,25 +70,26 @@ def test_context_change(conanfile):
 
     def context(self):
         assert self
-        return {"compiler": None}
+        return {"cmake_system_name": None}
+
     tmp.context = types.MethodType(context, tmp)
     content = toolchain.content
-    assert 'CMAKE_C_COMPILER' not in content
+    assert 'CMAKE_SYSTEM_NAME' not in content
 
 
 def test_context_update(conanfile):
     toolchain = CMakeToolchain(conanfile)
-    compiler = toolchain.blocks["generic_system"].values["compiler"]
-    toolchain.blocks["generic_system"].values["compiler"] = "Super" + compiler
+    cmake_system_name = toolchain.blocks["generic_system"].values["cmake_system_name"]
+    toolchain.blocks["generic_system"].values["cmake_system_name"] = "Super" + cmake_system_name
     content = toolchain.content
-    assert 'set(CMAKE_C_COMPILER Superclang)' in content
+    assert 'set(CMAKE_SYSTEM_NAME Superpotato)' in content
 
 
 def test_context_replace(conanfile):
     toolchain = CMakeToolchain(conanfile)
-    toolchain.blocks["generic_system"].values = {"compiler": "SuperClang"}
+    toolchain.blocks["generic_system"].values = {"cmake_system_name": "SuperPotato"}
     content = toolchain.content
-    assert 'set(CMAKE_C_COMPILER SuperClang)' in content
+    assert 'set(CMAKE_SYSTEM_NAME SuperPotato)' in content
 
 
 def test_replace_block(conanfile):
@@ -102,7 +104,7 @@ def test_replace_block(conanfile):
     toolchain.blocks["generic_system"] = MyBlock
     content = toolchain.content
     assert 'HelloWorld' in content
-    assert 'CMAKE_C_COMPILER' not in content
+    assert 'set(CMAKE_SYSTEM_NAME potato)' not in content
 
 
 def test_add_new_block(conanfile):
@@ -117,7 +119,7 @@ def test_add_new_block(conanfile):
     toolchain.blocks["mynewblock"] = MyBlock
     content = toolchain.content
     assert 'Hello World!!!' in content
-    assert 'CMAKE_C_COMPILER' in content
+    assert 'set(CMAKE_SYSTEM_NAME potato)' in content
 
 
 def test_user_toolchain(conanfile):
@@ -302,7 +304,7 @@ def test_fpic_when_shared_true(conanfile_linux_shared, fPIC):
     toolchain = CMakeToolchain(conanfile_linux_shared)
     cmake_value = 'ON' if fPIC else 'OFF'
     content = toolchain.content
-    assert 'set(CMAKE_POSITION_INDEPENDENT_CODE {})'.format(cmake_value) in content
+    assert 'set(CMAKE_POSITION_INDEPENDENT_CODE {} CACHE BOOL'.format(cmake_value) in content
 
 
 def test_fpic_when_not_shared(conanfile_linux_shared):
@@ -402,7 +404,7 @@ def test_libcxx_abi_flag():
     # by default, no flag is output anymore, it is assumed the compiler default
     assert 'GLIBCXX_USE_CXX11_ABI' not in content
     # recipe workaround for older distros
-    toolchain.blocks["libcxx"].values["glibcxx"] = "1"
+    toolchain.blocks["libcxx"].values["glibcxx"] = "_GLIBCXX_USE_CXX11_ABI=1"
     content = toolchain.content
     assert '_GLIBCXX_USE_CXX11_ABI=1' in content
 
@@ -488,3 +490,25 @@ def test_variables_types(conanfile):
 
     contents = load(os.path.join(conanfile.generators_folder, "conan_toolchain.cmake"))
     assert 'set(FOO ON CACHE BOOL "Variable FOO conan-toolchain defined")' in contents
+
+
+def test_compilers_block(conanfile):
+    cmake_mapping = {"c": "C", "cuda": "CUDA", "cpp": "CXX", "objc": "OBJC",
+                     "objcpp": "OBJCXX", "rc": "RC", 'fortran': "Fortran", 'asm': "ASM",
+                     "hip": "HIP", "ispc": "ISPC"}
+    compilers = {"c": "path_to_c", "cuda": "path_to_cuda", "cpp": "path_to_cpp",
+                 "objc": "path_to_objc", "objcpp": "path_to_objcpp", "rc": "path_to_rc",
+                 'fortran': "path_to_fortran", 'asm': "path_to_asm", "hip": "path_to_hip",
+                 "ispc": "path_to_ispc"}
+    conanfile.conf.define("tools.build:compiler_executables", compilers)
+    toolchain = CMakeToolchain(conanfile)
+    content = toolchain.content
+    for compiler, lang in cmake_mapping.items():
+        assert f'set(CMAKE_{lang}_COMPILER "path_to_{compiler}")' in content
+
+
+def test_linker_scripts_block(conanfile):
+    conanfile.conf.define("tools.build:linker_scripts", ["path_to_first_linker_script", "path_to_second_linker_script"])
+    toolchain = CMakeToolchain(conanfile)
+    content = toolchain.content
+    assert f'string(APPEND CONAN_EXE_LINKER_FLAGS -T"path_to_first_linker_script" -T"path_to_second_linker_script")' in content

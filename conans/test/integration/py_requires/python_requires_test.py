@@ -969,3 +969,154 @@ def test_transitive_diamond_python_requires():
            client.out
     assert "consumer/1.0@user/channel: Calling package()\nconsumer/1.0@user/channel: 222, 234" in \
            client.out
+
+
+def test_multiple_reuse():
+    """ test how to enable the multiple code reuse for custom user generators
+        # https://github.com/conan-io/conan/issues/11589
+    """
+
+    c = TestClient()
+    common = textwrap.dedent("""
+        from conan import ConanFile
+        def mycommon():
+            return 42
+        class Common(ConanFile):
+            name = "common"
+            version = "0.1"
+        """)
+    tool = textwrap.dedent("""
+        from conan import ConanFile
+
+        class MyGenerator:
+            common = None
+            def __init__(self, conanfile):
+                self.conanfile = conanfile
+            def generate(self):
+                self.conanfile.output.info("VALUE TOOL: {}!!!".format(MyGenerator.common.mycommon()))
+
+        class Tool(ConanFile):
+            name = "tool"
+            version = "0.1"
+            python_requires = "common/0.1"
+            def init(self):
+                MyGenerator.common = self.python_requires["common"].module
+        """)
+    consumer = textwrap.dedent("""
+        from conan import ConanFile
+        class Consumer(ConanFile):
+            python_requires = "tool/0.1", "common/0.1"
+            def generate(self):
+                mycommon = self.python_requires["common"].module.mycommon
+                self.output.info("VALUE COMMON: {}!!!".format(mycommon()))
+                mygenerator = self.python_requires["tool"].module.MyGenerator(self)
+                mygenerator.generate()
+        """)
+    c.save({"common/conanfile.py": common,
+            "tool/conanfile.py": tool,
+            "consumer/conanfile.py": consumer})
+    c.run("export common")
+    c.run("export tool")
+    c.run("install consumer")
+    assert "VALUE COMMON: 42!!!" in c.out
+    assert "VALUE TOOL: 42!!!" in c.out
+
+
+class TestTransitiveExtend:
+    # https://github.com/conan-io/conan/issues/10511
+    # https://github.com/conan-io/conan/issues/10565
+    def test_transitive_extend(self):
+        client = TestClient()
+        company = textwrap.dedent("""
+            from conan import ConanFile
+            class CompanyConanFile(ConanFile):
+                name = "company"
+                version = "1.0"
+
+                def msg1(self):
+                    return "company"
+                def msg2(self):
+                    return "company"
+            """)
+        project = textwrap.dedent("""
+            from conan import ConanFile
+            class ProjectBaseConanFile(ConanFile):
+                name = "project"
+                version = "1.0"
+
+                python_requires = "company/1.0"
+                python_requires_extend = "company.CompanyConanFile"
+
+                def msg1(self):
+                    return "project"
+            """)
+        consumer = textwrap.dedent("""
+            from conan import ConanFile
+            class Base(ConanFile):
+                name = "consumer"
+                version = "1.0"
+                python_requires = "project/1.0"
+                python_requires_extend = "project.ProjectBaseConanFile"
+                def generate(self):
+                    self.output.info("Msg1:{}!!!".format(self.msg1()))
+                    self.output.info("Msg2:{}!!!".format(self.msg2()))
+                """)
+        client.save({"company/conanfile.py": company,
+                     "project/conanfile.py": project,
+                     "consumer/conanfile.py": consumer})
+        client.run("export company")
+        client.run("export project")
+        client.run("install consumer")
+        assert "conanfile.py (consumer/1.0): Msg1:project!!!" in client.out
+        assert "conanfile.py (consumer/1.0): Msg2:company!!!" in client.out
+
+    def test_transitive_extend2(self):
+        client = TestClient()
+        company = textwrap.dedent("""
+            from conan import ConanFile
+            class CompanyConanFile(ConanFile):
+                name = "company"
+                version = "1.0"
+
+            class CompanyBase:
+                def msg1(self):
+                    return "company"
+                def msg2(self):
+                    return "company"
+            """)
+        project = textwrap.dedent("""
+            from conan import ConanFile
+            class ProjectBase:
+                def msg1(self):
+                    return "project"
+
+            class ProjectBaseConanFile(ConanFile):
+                name = "project"
+                version = "1.0"
+                python_requires = "company/1.0"
+
+                def init(self):
+                    pkg_name, base_class_name = "company", "CompanyBase"
+                    base_class = getattr(self.python_requires[pkg_name].module, base_class_name)
+                    global ProjectBase
+                    ProjectBase = type('ProjectBase', (ProjectBase, base_class, object), {})
+            """)
+        consumer = textwrap.dedent("""
+            from conan import ConanFile
+            class Base(ConanFile):
+                name = "consumer"
+                version = "1.0"
+                python_requires = "project/1.0"
+                python_requires_extend = "project.ProjectBase"
+                def generate(self):
+                    self.output.info("Msg1:{}!!!".format(self.msg1()))
+                    self.output.info("Msg2:{}!!!".format(self.msg2()))
+                """)
+        client.save({"company/conanfile.py": company,
+                     "project/conanfile.py": project,
+                     "consumer/conanfile.py": consumer})
+        client.run("export company")
+        client.run("export project")
+        client.run("install consumer")
+        assert "conanfile.py (consumer/1.0): Msg1:project!!!" in client.out
+        assert "conanfile.py (consumer/1.0): Msg2:company!!!" in client.out

@@ -538,11 +538,12 @@ class GraphLock(object):
         else:
             locked_requires = locked_node.requires or []
 
-        refs = {self._nodes[id_].ref.name: (self._nodes[id_].ref, id_) for id_ in locked_requires}
+        refs = {(self._nodes[id_].ref.name, self._nodes[id_].context): (self._nodes[id_].ref, id_) for id_ in locked_requires}
 
         for require in requires:
             try:
-                locked_ref, locked_id = refs[require.ref.name]
+                context = require.build_require_context if build_requires else node.context
+                locked_ref, locked_id = refs[(require.ref.name, context)]
             except KeyError:
                 t = "Build-require" if build_requires else "Require"
                 msg = "%s '%s' cannot be found in lockfile" % (t, require.ref.name)
